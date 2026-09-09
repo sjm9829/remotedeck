@@ -9,6 +9,34 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./store": {
+      "types": "./dist/store.d.ts",
+      "import": "./dist/store.js"
+    },
+    "./session/manager": {
+      "types": "./dist/session/manager.d.ts",
+      "import": "./dist/session/manager.js"
+    },
+    "./session/transport": {
+      "types": "./dist/session/transport.d.ts",
+      "import": "./dist/session/transport.js"
+    },
+    "./session/ringbuffer": {
+      "types": "./dist/session/ringbuffer.d.ts",
+      "import": "./dist/session/ringbuffer.js"
+    },
+    "./ticket": {
+      "types": "./dist/ticket.d.ts",
+      "import": "./dist/ticket.js"
+    },
+    "./crypto": {
+      "types": "./dist/crypto.d.ts",
+      "import": "./dist/crypto.js"
+    },
+    "./sqliteStore": {
+      "types": "./dist/sqliteStore.d.ts",
+      "import": "./dist/sqliteStore.js"
     }
   },
   "scripts": {

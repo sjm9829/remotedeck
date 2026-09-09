@@ -4,59 +4,34 @@ import { WebSocket } from 'ws';
 import type { FastifyInstance } from 'fastify';
 import { resolveConfig, MIN_API_TOKEN_LENGTH, type ResolvedConfig } from '../config.js';
 import { constantTimeTokenEquals, extractBearer } from '../auth.js';
-import { createApp } from '../app.js';
-import type { Db } from '../dbtypes.js';
+import { createApp, type AppHandle } from '../app.js';
+import { MemoryStore } from '@remotedeck/core/store';
+import { FakeTransport } from '@remotedeck/core/session/transport';
+import { WS_SUBPROTOCOL_PREFIX } from '@remotedeck/protocol';
 
-const VALID_MASTER_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const VALID_TOKEN = 'a'.repeat(MIN_API_TOKEN_LENGTH + 8); // comfortably above the minimum
+const MK = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const VALID_TOKEN = 'a'.repeat(MIN_API_TOKEN_LENGTH + 8);
 
-// Structural stub satisfying the Db interface used by the routes (avoids loading the
-// better-sqlite3 native addon in this Fastify-inject test process).
-function stubDb(): Db {
-  return {
-    prepare() {
-      return {
-        get: () => ({ total: 0, active: 0, detached: 0 }),
-        all: () => [],
-        run: () => ({ changes: 0 }),
-      };
-    },
-  };
+function buildDeps(config: ResolvedConfig) {
+  return { store: new MemoryStore(MK), transport: new FakeTransport(), config };
 }
-
-async function buildApp(config: ResolvedConfig): Promise<{ app: FastifyInstance; close: () => Promise<void> }> {
-  const { app } = createApp(stubDb(), config, { logger: false });
-  await app.ready();
-  return { app, close: () => app.close() };
+async function buildApp(config: ResolvedConfig): Promise<{ handle: AppHandle; close: () => Promise<void> }> {
+  const handle = createApp(buildDeps(config), { logger: false });
+  await handle.app.ready();
+  return { handle, close: () => handle.app.close() };
 }
 
 describe('config fail-closed validation', () => {
-  it('throws when master key is missing', () => {
-    assert.throws(() => resolveConfig({ REMOTEDECK_API_TOKEN: VALID_TOKEN }));
-  });
-  it('throws when master key is not 64 hex', () => {
-    assert.throws(() => resolveConfig({ REMOTEDECK_MASTER_KEY: 'deadbeef', REMOTEDECK_API_TOKEN: VALID_TOKEN }));
-  });
-  it('throws when api token is missing', () => {
-    assert.throws(() => resolveConfig({ REMOTEDECK_MASTER_KEY: VALID_MASTER_KEY }));
-  });
-  it('throws when api token is too short', () => {
-    assert.throws(() =>
-      resolveConfig({ REMOTEDECK_MASTER_KEY: VALID_MASTER_KEY, REMOTEDECK_API_TOKEN: 'short-token' }),
-    );
-  });
+  it('throws when master key is missing', () => { assert.throws(() => resolveConfig({ REMOTEDECK_API_TOKEN: VALID_TOKEN })); });
+  it('throws when master key is not 64 hex', () => { assert.throws(() => resolveConfig({ REMOTEDECK_MASTER_KEY: 'deadbeef', REMOTEDECK_API_TOKEN: VALID_TOKEN })); });
+  it('throws when api token is missing', () => { assert.throws(() => resolveConfig({ REMOTEDECK_MASTER_KEY: MK })); });
+  it('throws when api token is too short', () => { assert.throws(() => resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: 'short-token' })); });
   it('accepts a valid master key + token, default same-origin CORS', () => {
-    const c = resolveConfig({ REMOTEDECK_MASTER_KEY: VALID_MASTER_KEY, REMOTEDECK_API_TOKEN: VALID_TOKEN });
-    assert.equal(c.masterKey, VALID_MASTER_KEY);
-    assert.equal(c.apiToken, VALID_TOKEN);
-    assert.deepEqual(c.allowedOrigins, []);
+    const c = resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN });
+    assert.equal(c.masterKey, MK); assert.equal(c.apiToken, VALID_TOKEN); assert.deepEqual(c.allowedOrigins, []);
   });
   it('parses explicit allowed origins list', () => {
-    const c = resolveConfig({
-      REMOTEDECK_MASTER_KEY: VALID_MASTER_KEY,
-      REMOTEDECK_API_TOKEN: VALID_TOKEN,
-      REMOTEDECK_ALLOWED_ORIGINS: 'http://localhost:5173, https://deck.example.com',
-    });
+    const c = resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN, REMOTEDECK_ALLOWED_ORIGINS: 'http://localhost:5173, https://deck.example.com' });
     assert.deepEqual(c.allowedOrigins, ['http://localhost:5173', 'https://deck.example.com']);
   });
 });
@@ -74,81 +49,128 @@ describe('auth helpers', () => {
   });
 });
 
-describe('HTTP auth via Fastify inject', () => {
-  let ctx: { app: FastifyInstance; close: () => Promise<void> };
+describe('HTTP auth + validation + redaction + trust via inject', () => {
+  let ctx: { handle: AppHandle; close: () => Promise<void> };
+  let app: FastifyInstance;
+  const auth = { authorization: `Bearer ${VALID_TOKEN}` };
 
-  before(async () => {
-    ctx = await buildApp(resolveConfig({ REMOTEDECK_MASTER_KEY: VALID_MASTER_KEY, REMOTEDECK_API_TOKEN: VALID_TOKEN }));
-  });
+  before(async () => { ctx = await buildApp(resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN })); app = ctx.handle.app; });
   after(async () => { await ctx.close(); });
 
-  it('/healthz is allowed without auth (200)', async () => {
-    const res = await ctx.app.inject({ method: 'GET', url: '/healthz' });
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.json().status, 'ok');
+  it('/healthz allowed without auth (200)', async () => {
+    const res = await app.inject({ method: 'GET', url: '/healthz' });
+    assert.equal(res.statusCode, 200); assert.equal(res.json().status, 'ok');
+  });
+  it('/api/status without auth is 401', async () => {
+    assert.equal((await app.inject({ method: 'GET', url: '/api/status' })).statusCode, 401);
+  });
+  it('/api/status with wrong token is 401', async () => {
+    assert.equal((await app.inject({ method: 'GET', url: '/api/status', headers: { authorization: 'Bearer wrong-token-value-xxxxxxxxxxxxxxxx' } })).statusCode, 401);
+  });
+  it('/api/status with correct token is 200', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/status', headers: auth });
+    assert.equal(res.statusCode, 200); assert.equal(res.json().status, 'ok');
   });
 
-  it('/api/status without auth is rejected (401)', async () => {
-    const res = await ctx.app.inject({ method: 'GET', url: '/api/status' });
+  it('creates host, rejects missing fields (400)', async () => {
+    const ok = await app.inject({ method: 'POST', url: '/api/hosts', headers: auth, payload: { name: 'h', hostname: 'h.example', user: 'root' } });
+    assert.equal(ok.statusCode, 201); assert.equal(ok.json().data.hostKeyTrusted, false);
+    const bad = await app.inject({ method: 'POST', url: '/api/hosts', headers: auth, payload: { name: 'x' } });
+    assert.equal(bad.statusCode, 400); assert.equal(bad.json().error.code, 'bad_request');
+  });
+
+  it('creates credential and never returns the secret', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/credentials', headers: auth, payload: { name: 'c1', type: 'password', secret: 'super-secret-value' } });
+    assert.equal(res.statusCode, 201);
+    const body = JSON.stringify(res.json());
+    assert.ok(!body.includes('super-secret-value'), 'response leaked the secret');
+    assert.equal(res.json().data.hasSecret, true);
+    const badType = await app.inject({ method: 'POST', url: '/api/credentials', headers: auth, payload: { name: 'c2', type: 'bogus' } });
+    assert.equal(badType.statusCode, 400);
+  });
+
+  it('rejects invalid fingerprint format (400)', async () => {
+    const host = (await app.inject({ method: 'POST', url: '/api/hosts', headers: auth, payload: { name: 'h2', hostname: 'h2.example', user: 'root' } })).json().data;
+    const bad = await app.inject({ method: 'POST', url: `/api/hosts/${host.id}/trust`, headers: auth, payload: { fingerprint: 'not-a-fingerprint' } });
+    assert.equal(bad.statusCode, 400);
+    const good = await app.inject({ method: 'POST', url: `/api/hosts/${host.id}/trust`, headers: auth, payload: { fingerprint: 'SHA256:abc123def456' } });
+    assert.equal(good.statusCode, 200); assert.equal(good.json().data.hostKeyTrusted, true);
+  });
+
+  it('issues a single-use ws-ticket via authenticated REST', async () => {
+    const host = (await app.inject({ method: 'POST', url: '/api/hosts', headers: auth, payload: { name: 'h3', hostname: 'h3.example', user: 'root' } })).json().data;
+    (ctx.handle.transport as FakeTransport).setFingerprint({ host: 'h3.example', port: 22, username: 'root' }, 'SHA256:cafe');
+    await app.inject({ method: 'POST', url: `/api/hosts/${host.id}/trust`, headers: auth, payload: { fingerprint: 'SHA256:cafe' } });
+    const s = await app.inject({ method: 'POST', url: '/api/sessions', headers: auth, payload: { hostId: host.id } });
+    assert.equal(s.statusCode, 201);
+    const ticketRes = await app.inject({ method: 'POST', url: `/api/sessions/${s.json().data.id}/ws-ticket`, headers: auth, payload: { role: 'writer' } });
+    assert.equal(ticketRes.statusCode, 200);
+    const t = ticketRes.json().data;
+    assert.ok(t.ticket && t.role === 'writer');
+    // single use: redeem through the internal store
+    const ctx2 = ctx.handle.ticketStore.redeem(t.ticket);
+    assert.ok(ctx2, 'first redeem should succeed');
+    assert.equal(ctx.handle.ticketStore.redeem(t.ticket), null, 'ticket must be single-use');
+  });
+
+  it('unauthorized ws-ticket endpoint without token is 401', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/sessions/x/ws-ticket', payload: { role: 'writer' } });
     assert.equal(res.statusCode, 401);
-  });
-
-  it('/api/status with wrong token is rejected (401)', async () => {
-    const res = await ctx.app.inject({
-      method: 'GET',
-      url: '/api/status',
-      headers: { authorization: 'Bearer totally-wrong-token-value-xxxxxx' },
-    });
-    assert.equal(res.statusCode, 401);
-  });
-
-  it('/api/status with correct token is accepted (200)', async () => {
-    const res = await ctx.app.inject({
-      method: 'GET',
-      url: '/api/status',
-      headers: { authorization: `Bearer ${VALID_TOKEN}` },
-    });
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.json().status, 'ok');
   });
 });
 
-describe('WebSocket auth on upgrade', () => {
-  let ctx: { app: FastifyInstance; close: () => Promise<void>; port: number };
+describe('WebSocket auth via ticket subprotocol', () => {
+  let ctx: { handle: AppHandle; close: () => Promise<void>; port: number };
+  let sessionId: string;
 
   before(async () => {
-    const cfg = resolveConfig({ REMOTEDECK_MASTER_KEY: VALID_MASTER_KEY, REMOTEDECK_API_TOKEN: VALID_TOKEN });
-    const { app, attachWebSocketServer } = createApp(stubDb(), cfg, { logger: false });
-    attachWebSocketServer();
-    await app.listen({ port: 0, host: '127.0.0.1' });
-    const addr = app.server.address();
-    const port = typeof addr === 'object' && addr ? addr.port : 0;
-    ctx = { app, port, close: () => app.close() };
+    const handle = createApp(buildDeps(resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN })), { logger: false });
+    handle.attachWebSocketServer();
+    await handle.app.listen({ port: 0, host: '127.0.0.1' });
+    const addr = handle.app.server.address();
+    ctx = { handle, port: typeof addr === 'object' && addr ? addr.port : 0, close: () => handle.app.close() };
+    // Set up a trusted host + active session for the ticket flow.
+    const store = handle.store as MemoryStore;
+    const transport = handle.transport as FakeTransport;
+    const host = store.createHost({ name: 'ws-h', hostname: 'ws.example', port: 22, username: 'root', credentialId: null, tags: [], hostKeyFingerprint: 'SHA256:aaa', hostKeyTrusted: true });
+    transport.setFingerprint({ host: 'ws.example', port: 22, username: 'root' }, 'SHA256:aaa');
+    const res = await handle.manager.createSession({ hostId: host.id });
+    sessionId = res.session.id;
   });
   after(async () => { await ctx.close(); });
 
-  it('rejects a WebSocket upgrade without a token', async () => {
-    await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws/v1/sessions/x`);
-      const timer = setTimeout(() => { ws.terminate(); reject(new Error('ws handshake did not reject')); }, 4000);
-      ws.on('open', () => { clearTimeout(timer); ws.close(); reject(new Error('ws opened without token')); });
-      ws.on('error', () => { clearTimeout(timer); resolve(); });
-      ws.on('close', () => { clearTimeout(timer); resolve(); });
+  function connect(ticket: string | null): Promise<string | null> {
+    return new Promise((resolve, reject) => {
+      const protocols = ticket ? [WS_SUBPROTOCOL_PREFIX + ticket] : undefined;
+      const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws/sessions/${sessionId}`, protocols);
+      const timer = setTimeout(() => { ws.terminate(); resolve(null); }, 3000);
+      ws.on('message', (d) => { clearTimeout(timer); try { const m = JSON.parse(d.toString()); ws.close(); resolve(m.type); } catch (e) { reject(e); } });
+      ws.on('error', () => { clearTimeout(timer); resolve(null); });
+      ws.on('close', () => { clearTimeout(timer); resolve(null); });
     });
+  }
+
+  it('accepts a valid ticket via subprotocol (status received)', async () => {
+    const t = ctx.handle.ticketStore.issue(sessionId, 'writer');
+    const msg = await connect(t.value);
+    assert.equal(msg, 'status');
   });
 
-  it('accepts a WebSocket upgrade with a valid token', async () => {
-    await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws/v1/sessions/x?token=${VALID_TOKEN}`);
-      const timer = setTimeout(() => { ws.terminate(); reject(new Error('no status message')); }, 4000);
-      ws.on('message', (data) => {
-        clearTimeout(timer);
-        const msg = JSON.parse(data.toString());
-        assert.equal(msg.type, 'status');
-        ws.close();
-        resolve();
-      });
-      ws.on('error', (e) => { clearTimeout(timer); reject(e); });
-    });
+  it('rejects a reused ticket', async () => {
+    const t = ctx.handle.ticketStore.issue(sessionId, 'writer');
+    assert.ok(ctx.handle.ticketStore.redeem(t.value)); // burn it
+    const msg = await connect(t.value);
+    assert.equal(msg, null, 'reused ticket must be rejected');
+  });
+
+  it('rejects an expired ticket', async () => {
+    const t = ctx.handle.ticketStore.issue(sessionId, 'writer', 0); // already expired
+    const msg = await connect(t.value);
+    assert.equal(msg, null, 'expired ticket must be rejected');
+  });
+
+  it('rejects a connection with no ticket', async () => {
+    const msg = await connect(null);
+    assert.equal(msg, null, 'no ticket must be rejected');
   });
 });

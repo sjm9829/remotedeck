@@ -1,36 +1,52 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyError, type FastifyRequest, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
-import { WebSocketServer } from 'ws';
+import { SessionManager } from '@remotedeck/core/session/manager';
+import { TicketStore } from '@remotedeck/core/ticket';
+import type { Store } from '@remotedeck/core/store';
+import type { SshTransport } from '@remotedeck/core/session/transport';
 import type { ResolvedConfig } from './config.js';
-import type { Db } from './dbtypes.js';
 import { registerRoutes } from './routes.js';
+import { attachWebSocketServer as attachWs } from './ws.js';
 import { constantTimeTokenEquals, extractBearer } from './auth.js';
 
 export const HEALTH_PATH = '/healthz';
-export const WS_PATH_PREFIX = '/ws';
+export const VERSION = '0.2.0';
 
+export interface AppDeps {
+  store: Store;
+  transport: SshTransport;
+  config: ResolvedConfig;
+  manager?: SessionManager;
+  ticketStore?: TicketStore;
+}
 export interface AppHandle {
   app: FastifyInstance;
-  /** Attach the WebSocket upgrade handler to the running server. */
-  attachWebSocketServer: () => WebSocketServer;
+  manager: SessionManager;
+  ticketStore: TicketStore;
+  store: Store;
+  transport: SshTransport;
+  attachWebSocketServer: () => import('ws').WebSocketServer;
 }
 
-export function createApp(
-  db: Db,
-  config: ResolvedConfig,
-  opts: { logger?: boolean } = {},
-): AppHandle {
-  const app = Fastify({ logger: opts.logger ?? false });
+const CODE_STATUS: Record<string, number> = { not_found: 404, conflict: 409, forbidden: 403, invalid_state: 409, bad_request: 400, unauthorized: 401 };
 
-  // CORS: explicit allow-list only. Empty list => no cross-origin (same-origin only).
-  app.register(cors, {
-    origin: config.allowedOrigins,
-    credentials: true,
-  });
+export function createApp(deps: AppDeps, opts: { logger?: boolean; idleTimeoutMs?: number } = {}): AppHandle {
+  const { config, store } = deps;
+  const manager = deps.manager ?? new SessionManager({ store, transport: deps.transport, idleTimeoutMs: opts.idleTimeoutMs });
+  const ticketStore = deps.ticketStore ?? new TicketStore();
+
+  const app = Fastify({ logger: opts.logger ?? false });
+  app.register(cors, { origin: config.allowedOrigins, credentials: true });
   app.register(multipart, { limits: { fileSize: 50 * 1024 * 1024 } });
 
-  // Auth hook: only /healthz is unauthenticated. Everything else requires a valid token.
+  app.setErrorHandler((err: FastifyError, _req: FastifyRequest, reply: FastifyReply) => {
+    const status = (err as any).statusCode ?? CODE_STATUS[(err as any).code] ?? 500;
+    const code = CODE_STATUS[(err as any).code] ? (err as any).code : (status === 400 ? 'validation' : 'internal_error');
+    reply.code(status).type('application/json').send({ error: { code, message: err.message } });
+  });
+
+  // Auth hook: only /healthz is unauthenticated. WS upgrade is authenticated via ticket (see ws.ts).
   app.addHook('onRequest', async (req, reply) => {
     const path = req.url.split('?')[0];
     if (path === HEALTH_PATH) return;
@@ -40,39 +56,10 @@ export function createApp(
     }
   });
 
-  // Health endpoint (no auth).
   app.get(HEALTH_PATH, async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
+  registerRoutes(app, { store, manager, ticketStore, startTime: Date.now(), version: VERSION });
 
-  // API routes (protected by the auth hook above).
-  registerRoutes(app, db, config.masterKey, Date.now());
+  const attachWebSocketServer = attachWs(app, { manager, ticketStore });
 
-  const wss = new WebSocketServer({ noServer: true });
-
-  function attachWebSocketServer(): WebSocketServer {
-    app.server.on('upgrade', (req, socket, head) => {
-      const url = new URL(req.url ?? '', 'http://localhost');
-      if (!url.pathname.startsWith(WS_PATH_PREFIX)) return;
-      // Browsers cannot set custom headers on WS handshakes, so a ?token= query is
-      // accepted as an alternative to the Authorization header.
-      const presented = extractBearer(req.headers.authorization) ?? url.searchParams.get('token');
-      if (!presented || !constantTimeTokenEquals(presented, config.apiToken)) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-        return;
-      }
-      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
-    });
-    return wss;
-  }
-
-  wss.on('connection', (ws) => {
-    ws.send(JSON.stringify({
-      type: 'status',
-      ts: new Date().toISOString(),
-      data: { status: 'connected', message: 'RemoteDeck Core 1A' },
-    }));
-    ws.on('close', () => {});
-  });
-
-  return { app, attachWebSocketServer };
+  return { app, manager, ticketStore, store, transport: deps.transport, attachWebSocketServer };
 }

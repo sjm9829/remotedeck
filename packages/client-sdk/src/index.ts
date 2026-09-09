@@ -1,6 +1,15 @@
-export interface ClientConfig {
-  baseUrl: string;
-  token: string;
+// Minimal RemoteDeck client SDK (browser + node). Credentials/token live only in
+// memory; nothing is persisted to localStorage. WebSocket auth uses a single-use
+// ticket via the Sec-WebSocket-Protocol subprotocol (never a URL query token).
+import type { WsMessage } from '@remotedeck/protocol';
+
+export interface ClientConfig { baseUrl: string; token: string; }
+const WS_SUBPROTOCOL_PREFIX = 'remotedeck.v1.';
+
+async function j(res: Response): Promise<any> {
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${res.status} ${JSON.stringify(body)}`);
+  return body;
 }
 
 export class RemoteDeckClient {
@@ -11,27 +20,39 @@ export class RemoteDeckClient {
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
     this.token = config.token;
   }
+  private headers(): Record<string, string> { return { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' }; }
 
-  async health(): Promise<{ status: string; timestamp: string }> {
-    const res = await fetch(`${this.baseUrl}/healthz`, {
-      headers: { Authorization: `Bearer ${this.token}` },
-    });
-    if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
-    const data = await res.json() as { status: string; timestamp: string };
-    return data;
+  async health(): Promise<{ status: string; timestamp: string }> { return (await j(await fetch(`${this.baseUrl}/healthz`))); }
+  async status(): Promise<any> { return (await j(await fetch(`${this.baseUrl}/api/status`, { headers: this.headers() }))); }
+
+  async listHosts(): Promise<any[]> { return (await j(await fetch(`${this.baseUrl}/api/hosts`, { headers: this.headers() }))).data; }
+  async createHost(b: { name: string; hostname: string; user: string; credentialId?: string; tags?: string[] }): Promise<any> {
+    return (await j(await fetch(`${this.baseUrl}/api/hosts`, { method: 'POST', headers: this.headers(), body: JSON.stringify(b) }))).data;
+  }
+  async trustHost(id: string, fingerprint: string): Promise<any> {
+    return (await j(await fetch(`${this.baseUrl}/api/hosts/${id}/trust`, { method: 'POST', headers: this.headers(), body: JSON.stringify({ fingerprint }) }))).data;
   }
 
-  async status(): Promise<{ status: string; version: string; uptime: number }> {
-    const res = await fetch(`${this.baseUrl}/api/status`, {
-      headers: { Authorization: `Bearer ${this.token}` },
-    });
-    if (!res.ok) throw new Error(`Status check failed: ${res.status}`);
-    const data = await res.json() as { status: string; version: string; uptime: number };
-    return data;
+  async createCredential(b: { name: string; type: string; secret?: string; keyPath?: string }): Promise<any> {
+    return (await j(await fetch(`${this.baseUrl}/api/credentials`, { method: 'POST', headers: this.headers(), body: JSON.stringify(b) }))).data;
   }
 
-  wsUrl(sessionId: string, role: 'writer' | 'viewer'): string {
+  async listSessions(): Promise<any[]> { return (await j(await fetch(`${this.baseUrl}/api/sessions`, { headers: this.headers() }))).data; }
+  async createSession(b: { hostId: string; credentialId?: string }): Promise<any> {
+    return (await j(await fetch(`${this.baseUrl}/api/sessions`, { method: 'POST', headers: this.headers(), body: JSON.stringify(b) }))).data;
+  }
+  async closeSession(id: string): Promise<any> {
+    return (await j(await fetch(`${this.baseUrl}/api/sessions/${id}/close`, { method: 'POST', headers: this.headers() }))).data;
+  }
+  async wsTicket(sessionId: string, role: 'writer' | 'viewer' = 'writer'): Promise<{ ticket: string; role: string; expiresAt: string }> {
+    return (await j(await fetch(`${this.baseUrl}/api/sessions/${sessionId}/ws-ticket`, { method: 'POST', headers: this.headers(), body: JSON.stringify({ role }) }))).data;
+  }
+
+  // Open a session WebSocket using a single-use ticket via the negotiated subprotocol.
+  connectSession(sessionId: string, ticket: string): WebSocket {
     const wsBase = this.baseUrl.replace(/^http/, 'ws');
-    return `${wsBase}/ws/v1/sessions/${sessionId}?role=${role}&token=${this.token}`;
+    return new WebSocket(`${wsBase}/ws/sessions/${sessionId}`, [WS_SUBPROTOCOL_PREFIX + ticket]);
   }
 }
+
+export type { WsMessage };
