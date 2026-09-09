@@ -1,0 +1,19 @@
+{
+  "name": "remotedeck",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=packages/types && npm run build --workspace=packages/protocol && npm run build --workspace=packages/api && npm run build --workspace=packages/core && npm run build --workspace=packages/client-sdk && npm run build --workspace=apps/core-server",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspace=packages/types && npm run typecheck --workspace=packages/protocol && npm run typecheck --workspace=packages/api && npm run typecheck --workspace=packages/core && npm run typecheck --workspace=packages/client-sdk && npm run typecheck --workspace=apps/core-server",
+    "dev:server": "npm run dev --workspace=apps/core-server"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

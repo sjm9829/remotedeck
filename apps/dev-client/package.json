@@ -1,0 +1,19 @@
+{
+  "name": "@remotedeck/dev-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "echo 'dev-client build placeholder' && exit 0",
+    "typecheck": "echo 'dev-client typecheck placeholder' && exit 0",
+    "dev": "echo 'dev-client dev placeholder' && exit 0"
+  },
+  "dependencies": {
+    "@remotedeck/client-sdk": "*",
+    "@remotedeck/protocol": "*",
+    "@remotedeck/types": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
