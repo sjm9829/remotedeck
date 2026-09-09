@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
-import type Database from 'better-sqlite3';
+import type { Db } from './dbtypes.js';
 import { v4 as uuidv4 } from 'uuid';
 
-export function registerRoutes(app: FastifyInstance, db: Database.Database, masterKey: string, startTime: number): void {
+export function registerRoutes(app: FastifyInstance, db: Db, masterKey: string, startTime: number): void {
 
   // GET /api/status
   app.get('/api/status', async () => {

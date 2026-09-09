@@ -7,6 +7,8 @@ services:
       - "4100:4100"
     environment:
       - REMOTEDECK_MASTER_KEY=${REMOTEDECK_MASTER_KEY}
+      - REMOTEDECK_API_TOKEN=${REMOTEDECK_API_TOKEN}
+      - REMOTEDECK_ALLOWED_ORIGINS=${REMOTEDECK_ALLOWED_ORIGINS}
       - PORT=4100
       - DATABASE_PATH=/data/remotedeck.db
     volumes:

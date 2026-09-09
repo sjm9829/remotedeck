@@ -8,10 +8,11 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace=packages/types && npm run build --workspace=packages/protocol && npm run build --workspace=packages/api && npm run build --workspace=packages/core && npm run build --workspace=packages/client-sdk && npm run build --workspace=apps/core-server",
+    "build": "npm run build --workspace=packages/types && npm run build --workspace=packages/protocol && npm run build --workspace=packages/api && npm run build --workspace=packages/core && npm run build --workspace=packages/client-sdk && npm run build --workspace=apps/core-server && npm run build --workspace=apps/dev-client",
     "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspace=packages/types && npm run typecheck --workspace=packages/protocol && npm run typecheck --workspace=packages/api && npm run typecheck --workspace=packages/core && npm run typecheck --workspace=packages/client-sdk && npm run typecheck --workspace=apps/core-server",
-    "dev:server": "npm run dev --workspace=apps/core-server"
+    "typecheck": "npm run typecheck --workspace=packages/types && npm run typecheck --workspace=packages/protocol && npm run typecheck --workspace=packages/api && npm run typecheck --workspace=packages/core && npm run typecheck --workspace=packages/client-sdk && npm run typecheck --workspace=apps/core-server && npm run typecheck --workspace=apps/dev-client",
+    "dev:server": "npm run dev --workspace=apps/core-server",
+    "dev:client": "npm run dev --workspace=apps/dev-client"
   },
   "engines": {
     "node": ">=24.0.0"
