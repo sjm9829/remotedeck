@@ -97,6 +97,39 @@ describe('HTTP auth + validation + redaction + trust via inject', () => {
     assert.equal(good.statusCode, 200); assert.equal(good.json().data.hostKeyTrusted, true);
   });
 
+  it('PATCH host: maps user→username, validates port, revokes trust on endpoint change', async () => {
+    const created = (await app.inject({ method: 'POST', url: '/api/hosts', headers: auth,
+      payload: { name: 'hp', hostname: 'hp.example', user: 'alice', port: 2222 } })).json().data;
+    assert.equal(created.username, 'alice');
+    assert.equal(created.port, 2222);
+    // trust it first so we can observe the revocation
+    await app.inject({ method: 'POST', url: `/api/hosts/${created.id}/trust`, headers: auth,
+      payload: { fingerprint: 'SHA256:hpfp12345' } });
+    const trusted = (await app.inject({ method: 'GET', url: `/api/hosts/${created.id}`, headers: auth })).json().data;
+    assert.equal(trusted.hostKeyTrusted, true);
+
+    // non-endpoint field update: user maps to username, trust preserved
+    const patchUser = await app.inject({ method: 'PATCH', url: `/api/hosts/${created.id}`, headers: auth,
+      payload: { user: 'bob' } });
+    assert.equal(patchUser.statusCode, 200);
+    assert.equal(patchUser.json().data.username, 'bob');
+    assert.equal(patchUser.json().data.hostKeyTrusted, true, 'non-endpoint PATCH must not revoke trust');
+
+    // endpoint change (port) reflects new port AND revokes trust + clears fingerprint
+    const patchPort = await app.inject({ method: 'PATCH', url: `/api/hosts/${created.id}`, headers: auth,
+      payload: { port: 3333 } });
+    assert.equal(patchPort.statusCode, 200);
+    assert.equal(patchPort.json().data.port, 3333);
+    assert.equal(patchPort.json().data.hostKeyTrusted, false, 'endpoint change must revoke trust');
+    assert.equal(patchPort.json().data.hostKeyFingerprint, null, 'endpoint change must clear fingerprint');
+
+    // invalid port rejected
+    const badPort = await app.inject({ method: 'PATCH', url: `/api/hosts/${created.id}`, headers: auth,
+      payload: { port: 99999 } });
+    assert.equal(badPort.statusCode, 400);
+    assert.equal(badPort.json().error.code, 'bad_request');
+  });
+
   it('issues a single-use ws-ticket via authenticated REST', async () => {
     const host = (await app.inject({ method: 'POST', url: '/api/hosts', headers: auth, payload: { name: 'h3', hostname: 'h3.example', user: 'root' } })).json().data;
     (ctx.handle.transport as FakeTransport).setFingerprint({ host: 'h3.example', port: 22, username: 'root' }, 'SHA256:cafe');

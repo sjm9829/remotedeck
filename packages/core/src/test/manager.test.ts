@@ -161,3 +161,64 @@ describe('single-use + expiring WS ticket', () => {
     assert.equal(t.redeem('unknown'), null);
   });
 });
+
+describe('credential mapping + session failed transitions', () => {
+  it('password credential maps to target.password (not privateKey)', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const mgr = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    const cred = store.createCredential({ name: 'pw', type: 'password', secret: 's3cret-pw', keyPath: null });
+    transport.setFingerprint({ host: 'hp', port: 22, username: 'u' }, 'SHA256:fp');
+    const host = store.createHost({ name: 'hp', hostname: 'hp', port: 22, username: 'u', credentialId: cred.id, tags: [], hostKeyFingerprint: 'SHA256:fp', hostKeyTrusted: true });
+    const res = await mgr.createSession({ hostId: host.id });
+    assert.equal(res.session.state, 'active');
+    const t = transport.lastConnectTarget!;
+    assert.equal(t.password, 's3cret-pw');
+    assert.equal(t.privateKey, undefined);
+  });
+
+  it('key credential maps to target.privateKey (not password)', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const mgr = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    const cred = store.createCredential({ name: 'key', type: 'key', secret: 'PEMKEYDATA', keyPath: null });
+    transport.setFingerprint({ host: 'hk', port: 22, username: 'u' }, 'SHA256:fp');
+    const host = store.createHost({ name: 'hk', hostname: 'hk', port: 22, username: 'u', credentialId: cred.id, tags: [], hostKeyFingerprint: 'SHA256:fp', hostKeyTrusted: true });
+    await mgr.createSession({ hostId: host.id });
+    const t = transport.lastConnectTarget!;
+    assert.equal(t.privateKey, 'PEMKEYDATA');
+    assert.equal(t.password, undefined);
+  });
+
+  it('session-level credentialId overrides the host credential', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const mgr = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    const credA = store.createCredential({ name: 'a', type: 'password', secret: 'pwA', keyPath: null });
+    const credB = store.createCredential({ name: 'b', type: 'password', secret: 'pwB', keyPath: null });
+    transport.setFingerprint({ host: 'ho', port: 22, username: 'u' }, 'SHA256:fp');
+    const host = store.createHost({ name: 'ho', hostname: 'ho', port: 22, username: 'u', credentialId: credA.id, tags: [], hostKeyFingerprint: 'SHA256:fp', hostKeyTrusted: true });
+    await mgr.createSession({ hostId: host.id, credentialId: credB.id });
+    assert.equal(transport.lastConnectTarget!.password, 'pwB', 'session credential must win over host default');
+  });
+
+  it('connect error -> session transitions to failed', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const mgr = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    transport.setFingerprint({ host: 'hf', port: 22, username: 'u' }, 'SHA256:fp');
+    const host = store.createHost({ name: 'hf', hostname: 'hf', port: 22, username: 'u', credentialId: null, tags: [], hostKeyFingerprint: 'SHA256:fp', hostKeyTrusted: true });
+    transport.failConnect = true;
+    await assert.rejects(() => mgr.createSession({ hostId: host.id }), /fake_connect_error/);
+    const sid = store.listSessions()[0].id;
+    assert.equal(mgr.getState(sid), 'failed');
+    assert.equal(store.getSession(sid)!.state, 'failed');
+  });
+
+  it('observe error on untrusted host -> session transitions to failed', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const mgr = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    transport.setFingerprint({ host: 'ho2', port: 22, username: 'u' }, 'SHA256:fp');
+    const host = store.createHost({ name: 'ho2', hostname: 'ho2', port: 22, username: 'u', credentialId: null, tags: [], hostKeyFingerprint: null, hostKeyTrusted: false });
+    transport.failObserve = true;
+    await assert.rejects(() => mgr.createSession({ hostId: host.id }), /fake_observe_error/);
+    const sid = store.listSessions()[0].id;
+    assert.equal(mgr.getState(sid), 'failed');
+  });
+});

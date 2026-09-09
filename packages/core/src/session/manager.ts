@@ -21,6 +21,7 @@ export interface ManagerOptions {
 interface Runtime {
   id: string;
   hostId: string;
+  credentialId: string | null;
   state: SessionState;
   shell: ShellHandle | null;
   writerId: string | null;
@@ -49,11 +50,48 @@ export class SessionManager extends EventEmitter {
   writerOf(id: string): string | null { return this.runtimes.get(id)?.writerId ?? null; }
   viewersOf(id: string): string[] { return [...(this.runtimes.get(id)?.viewers.keys() ?? [])]; }
 
-  private targetForHost(hostId: string): TransportTarget {
-    const host = this.opts.store.getHost(hostId);
-    if (!host) throw new Error('host_not_found');
-    const cred = host.credentialId ? this.opts.store.decryptCredentialSecret(host.credentialId) : null;
-    return { host: host.hostname, port: host.port, username: host.username, privateKey: cred ?? undefined };
+  /**
+   * Resolve the transport target for a session. The session-level credentialId
+   * (override) takes priority over the host's default credential. The credential
+   * TYPE decides which field the secret populates: password -> target.password,
+   * key -> target.privateKey. Unsupported shapes (agent, keyPath-only, missing
+   * secret) are rejected fail-closed with a clear error.
+   */
+  private buildTarget(rt: Runtime): TransportTarget {
+    const host = this.opts.store.getHost(rt.hostId);
+    if (!host) { const e = new Error('host_not_found'); (e as any).code = 'not_found'; throw e; }
+    const base: TransportTarget = { host: host.hostname, port: host.port, username: host.username };
+    const credId = rt.credentialId ?? host.credentialId ?? null; // session override first
+    if (!credId) return base; // no credential resolved; the transport fails closed at connect (no auth material)
+    const cred = this.opts.store.getCredential(credId);
+    if (!cred) { const e = new Error('credential_not_found'); (e as any).code = 'not_found'; throw e; }
+    const secret = this.opts.store.decryptCredentialSecret(credId); // string | null
+    const target: TransportTarget = { ...base };
+    switch (cred.type) {
+      case 'password':
+        if (secret) target.password = secret;
+        else { const e = new Error('password credential has no secret'); (e as any).code = 'not_supported'; throw e; }
+        break;
+      case 'key':
+        if (secret) target.privateKey = secret;
+        else if (cred.keyPath) {
+          const e = new Error('keyPath-only key credential not supported; store the private key as the secret');
+          (e as any).code = 'not_supported'; throw e;
+        } else {
+          const e = new Error('key credential has no secret');
+          (e as any).code = 'not_supported'; throw e;
+        }
+        break;
+      case 'agent': {
+        const e = new Error('agent credential not supported by the ssh2 transport');
+        (e as any).code = 'not_supported'; throw e;
+      }
+      default: {
+        const e = new Error(`unsupported credential type: ${cred.type}`);
+        (e as any).code = 'not_supported'; throw e;
+      }
+    }
+    return target;
   }
 
   /** Create a session. Fail-closed on untrusted host: observe fingerprint, do not connect. */
@@ -62,18 +100,24 @@ export class SessionManager extends EventEmitter {
     if (!host) { const e = new Error('host_not_found'); (e as any).code = 'not_found'; throw e; }
     const credentialId = params.credentialId ?? host.credentialId ?? null;
     const row = this.opts.store.createSession({ hostId: host.id, credentialId, state: 'creating', writerId: params.writerId ?? null });
-    const rt: Runtime = { id: row.id, hostId: host.id, state: 'creating', shell: null, writerId: params.writerId ?? null,
+    const rt: Runtime = { id: row.id, hostId: host.id, credentialId, state: 'creating', shell: null, writerId: params.writerId ?? null,
       viewers: new Map(), attachments: new Map(), buffer: new RingBuffer(this.scrollbackBytes), idleTimer: null };
     this.runtimes.set(row.id, rt);
 
     if (!host.hostKeyTrusted) {
       // Observe the fingerprint but DO NOT connect (fail closed until trusted).
-      const fingerprint = await this.opts.transport.observeFingerprint(this.targetForHost(host.id));
+      let fingerprint: string;
+      try {
+        fingerprint = await this.opts.transport.observeFingerprint(this.buildTarget(rt));
+      } catch (e) {
+        this.failSession(rt); // connection/observe error -> session failed
+        throw e;
+      }
       this.opts.store.updateHost(host.id, { hostKeyFingerprint: fingerprint });
       this.setState(rt, 'awaiting-trust');
       return { session: this.opts.store.getSession(row.id)!, requiresTrust: true, fingerprint };
     }
-    await this.connect(rt, host.hostKeyFingerprint!);
+    await this.connect(rt, host.hostKeyFingerprint!); // connect fails the session on error
     return { session: this.opts.store.getSession(row.id)!, requiresTrust: false };
   }
 
@@ -89,8 +133,14 @@ export class SessionManager extends EventEmitter {
 
   private async connect(rt: Runtime, expectedFingerprint: string): Promise<void> {
     this.setState(rt, 'connecting');
-    const target = this.targetForHost(rt.hostId);
-    const shell = await this.opts.transport.connectShell(target, expectedFingerprint); // may throw fingerprint_mismatch
+    const target = this.buildTarget(rt);
+    let shell: ShellHandle;
+    try {
+      shell = await this.opts.transport.connectShell(target, expectedFingerprint); // may throw fingerprint_mismatch
+    } catch (e) {
+      this.failSession(rt); // connect/observe error -> session failed + cleanup
+      throw e;
+    }
     rt.shell = shell;
     shell.on('output', (data: string) => {
       rt.buffer.push(data);
@@ -184,6 +234,13 @@ export class SessionManager extends EventEmitter {
       if (att) return { rt, att };
     }
     const e = new Error('attachment_not_found'); (e as any).code = 'not_found'; throw e;
+  }
+
+  /** Transition a session to failed and clean up any connection objects. */
+  private failSession(rt: Runtime): void {
+    this.clearIdle(rt);
+    if (rt.shell) { try { rt.shell.close(); } catch {} rt.shell = null; }
+    if (rt.state !== 'failed') this.setState(rt, 'failed');
   }
 
   private startIdle(rt: Runtime): void {

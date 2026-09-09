@@ -42,13 +42,35 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   });
 
   app.patch<{ Params: { id: string }; Body: any }>('/api/hosts/:id', async (req, reply) => {
+    const cur = store.getHost(req.params.id);
+    if (!cur) return fail(reply, 404, 'not_found', 'host not found');
     const b: any = req.body ?? {};
     if (b.credentialId && !store.getCredential(b.credentialId)) return fail(reply, 400, 'bad_request', 'unknown credentialId');
-    const fields: any = {};
-    for (const k of ['name', 'hostname', 'user', 'credentialId', 'tags']) if (k in b) fields[k] = b[k];
-    if (Object.keys(fields).length === 0) return fail(reply, 400, 'bad_request', 'no fields to update');
-    const row = store.updateHost(req.params.id, fields);
-    return row ? { data: row } : fail(reply, 404, 'not_found', 'host not found');
+    const hasField = (k: string) => k in b;
+    if (!hasField('name') && !hasField('hostname') && !hasField('user') && !hasField('port') && !hasField('credentialId') && !hasField('tags'))
+      return fail(reply, 400, 'bad_request', 'no fields to update');
+    // Merge on the CURRENT record so partial updates work and `user` maps to username.
+    const name = hasField('name') ? b.name : cur.name;
+    const hostname = hasField('hostname') ? b.hostname : cur.hostname;
+    const username = hasField('user') ? b.user : cur.username;
+    const port = hasField('port') ? b.port : cur.port;
+    if (typeof name !== 'string' || !name) return fail(reply, 400, 'bad_request', 'name must be a non-empty string');
+    if (typeof hostname !== 'string' || !hostname) return fail(reply, 400, 'bad_request', 'hostname must be a non-empty string');
+    if (typeof username !== 'string' || !username) return fail(reply, 400, 'bad_request', 'user must be a non-empty string');
+    const newPort = Number(port);
+    if (!Number.isInteger(newPort) || newPort < 1 || newPort > 65535) return fail(reply, 400, 'bad_request', 'invalid port');
+    const credentialId = hasField('credentialId') ? b.credentialId : cur.credentialId;
+    const tags = hasField('tags') ? (Array.isArray(b.tags) ? b.tags : []) : cur.tags;
+    // Snapshot the current endpoint + trust BEFORE mutating: store.updateHost mutates the
+    // live row in place, so `cur` would already reflect the new values otherwise.
+    const origHost = cur.hostname;
+    const origPort = cur.port;
+    const origTrusted = cur.hostKeyTrusted;
+    const row = store.updateHost(req.params.id, { name, hostname, port: newPort, username, credentialId, tags });
+    // Endpoint change invalidates any existing trust (the host key is now unknown).
+    const endpointChanged = hostname !== origHost || newPort !== origPort;
+    if (endpointChanged && origTrusted) store.updateHost(req.params.id, { hostKeyFingerprint: null, hostKeyTrusted: false });
+    return { data: store.getHost(req.params.id) };
   });
 
   app.delete<{ Params: { id: string } }>('/api/hosts/:id', async (req, reply) => {
@@ -122,6 +144,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       return reply.code(201).send({ data: { ...session, requiresTrust: false } });
     } catch (e: any) {
       if (e.code === 'not_found') return fail(reply, 404, 'not_found', e.message);
+      if (e.code === 'not_supported') return fail(reply, 400, 'not_supported', e.message);
       return fail(reply, 409, 'conflict', e.message);
     }
   });

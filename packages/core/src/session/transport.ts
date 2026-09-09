@@ -46,16 +46,26 @@ export class FakeTransport implements SshTransport {
   /** key = host:port:username -> configured fingerprint */
   fingerprints = new Map<string, string>();
   shells = new Map<string, FakeShellHandle>();
+  /** Set to true to make observeFingerprint/connectShell reject (tests connection failure). */
+  failObserve = false;
+  failConnect = false;
+  /** Records the most recent target handed to the transport (tests credential mapping). */
+  lastObserveTarget: TransportTarget | null = null;
+  lastConnectTarget: TransportTarget | null = null;
 
   setFingerprint(target: TransportTarget, fp: string): void { this.fingerprints.set(this.key(target), fp); }
   private key(t: TransportTarget): string { return `${t.host}:${t.port}:${t.username}`; }
 
   async observeFingerprint(target: TransportTarget): Promise<string> {
+    this.lastObserveTarget = target;
+    if (this.failObserve) throw new Error('fake_observe_error');
     const fp = this.fingerprints.get(this.key(target));
     if (!fp) throw new Error('no_host_key');
     return fp;
   }
   async connectShell(target: TransportTarget, expectedFingerprint: string): Promise<ShellHandle> {
+    this.lastConnectTarget = target;
+    if (this.failConnect) throw new Error('fake_connect_error');
     const fp = this.fingerprints.get(this.key(target));
     if (!fp) throw new Error('no_host_key');
     if (fp !== expectedFingerprint) throw new Error('fingerprint_mismatch');
