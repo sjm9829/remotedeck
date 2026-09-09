@@ -6,3 +6,7 @@ export * from './ticket.js';
 export * from './session/manager.js';
 export * from './session/transport.js';
 export * from './session/ringbuffer.js';
+export * from './session/path.js';
+export * from './session/sftp-transport.js';
+export * from './session/target.js';
+export * from './session/sftp-manager.js';

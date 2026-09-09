@@ -54,6 +54,35 @@ export interface NewHost {
 export interface NewCredential {
   name: string; type: CredentialType; secret: string | null; keyPath: string | null;
 }
+// ---- SFTP sessions ---------------------------------------------------------
+
+export type SftpSessionStatus = 'starting' | 'awaiting-trust' | 'ready' | 'error';
+
+export interface SftpSession {
+  id: string;
+  hostId: string;
+  credentialId: string | null;
+  rootPath: string;
+  fingerprint: string;
+  status: SftpSessionStatus;
+  reason: string | null;
+  lastActiveAt: string;
+  closedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SftpSessionRecordInput {
+  hostId: string;
+  credentialId: string | null;
+  rootPath: string;
+  fingerprint: string;
+  status: SftpSessionStatus;
+  lastActiveAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 
 export interface Store {
   createHost(h: NewHost): HostRow;
@@ -79,6 +108,13 @@ export interface Store {
   updateSession(id: string, fields: Partial<Pick<SessionRow, 'state' | 'writerId' | 'closedAt'>>): void;
 
   statusCounts(): { sessions: { active: number; detached: number; total: number }; connections: { active: number; total: number } };
+
+  // SFTP sessions.
+  createSftpSession(input: SftpSessionRecordInput): SftpSession;
+  getSftpSession(id: string): SftpSession | null;
+  listSftpSessions(): SftpSession[];
+  updateSftpSession(id: string, fields: Partial<Pick<SftpSession, 'status' | 'reason' | 'fingerprint' | 'lastActiveAt' | 'closedAt' | 'updatedAt'>>): void;
+  deleteSftpSession(id: string): boolean;
 }
 
 function now(): string { return new Date().toISOString(); }
@@ -87,6 +123,7 @@ export class MemoryStore implements Store {
   private hosts = new Map<string, HostRow>();
   private creds = new Map<string, CredentialRow & { secretEncrypted: Buffer | null }>();
   private sessions = new Map<string, SessionRow>();
+  private sftpSessions = new Map<string, SftpSession>();
 
   createHost(h: NewHost): HostRow {
     const row: HostRow = { id: randomUUID(), ...h, createdAt: now(), updatedAt: now() };
@@ -152,6 +189,20 @@ export class MemoryStore implements Store {
     for (const r of this.sessions.values()) { s.total++; if (r.state === 'active') s.active++; else if (r.state === 'detached') s.detached++; }
     return { sessions: s, connections: { active: s.active, total: s.total } };
   }
+
+  createSftpSession(input: SftpSessionRecordInput): SftpSession {
+    const id = randomUUID();
+    const row: SftpSession = { id, ...input, closedAt: null, reason: null };
+    this.sftpSessions.set(id, row);
+    return row;
+  }
+  getSftpSession(id: string): SftpSession | null { return this.sftpSessions.get(id) ?? null; }
+  listSftpSessions(): SftpSession[] { return [...this.sftpSessions.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)); }
+  updateSftpSession(id: string, fields: Partial<Pick<SftpSession, 'status' | 'reason' | 'fingerprint' | 'lastActiveAt' | 'closedAt' | 'updatedAt'>>): void {
+    const row = this.sftpSessions.get(id); if (!row) return;
+    Object.assign(row, fields, { updatedAt: now() });
+  }
+  deleteSftpSession(id: string): boolean { return this.sftpSessions.delete(id); }
 
   // masterKey injected for encryption (MemoryStore keeps it in memory)
   constructor(private readonly masterKey: string) {}

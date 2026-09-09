@@ -56,6 +56,13 @@ export function runMigrations(db: Database.Database): void {
       reattached_at TEXT,
       closed_at TEXT
     );
+  CREATE TABLE IF NOT EXISTS sftp_sessions (
+    id TEXT PRIMARY KEY, hostId TEXT NOT NULL, credentialId TEXT,
+    rootPath TEXT NOT NULL, fingerprint TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'starting', reason TEXT,
+    lastActiveAt TEXT NOT NULL, closedAt TEXT,
+    createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
+  );
 
     CREATE TABLE IF NOT EXISTS session_attachments (
       id TEXT PRIMARY KEY,

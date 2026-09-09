@@ -37,6 +37,22 @@
     "./sqliteStore": {
       "types": "./dist/sqliteStore.d.ts",
       "import": "./dist/sqliteStore.js"
+    },
+    "./session/sftp-transport": {
+      "types": "./dist/session/sftp-transport.d.ts",
+      "import": "./dist/session/sftp-transport.js"
+    },
+    "./session/path": {
+      "types": "./dist/session/path.d.ts",
+      "import": "./dist/session/path.js"
+    },
+    "./session/target": {
+      "types": "./dist/session/target.d.ts",
+      "import": "./dist/session/target.js"
+    },
+    "./session/sftp-manager": {
+      "types": "./dist/session/sftp-manager.d.ts",
+      "import": "./dist/session/sftp-manager.js"
     }
   },
   "scripts": {
@@ -45,7 +61,7 @@
     "test": "node --test dist/test/**/*.test.js"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0"
+    "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {
     "@remotedeck/types": "*",

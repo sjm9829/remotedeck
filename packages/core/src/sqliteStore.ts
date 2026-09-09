@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { encrypt, decrypt, serializePayload, deserializePayload } from './crypto.js';
-import type { Store, HostRow, CredentialRow, SessionRow, NewHost, NewCredential, CredentialType, SessionState } from './store.js';
+import type { Store, HostRow, CredentialRow, SessionRow, NewHost, NewCredential, CredentialType, SessionState, SftpSession, SftpSessionRecordInput } from './store.js';
 
 interface HostDbRow { id: string; name: string; hostname: string; port: number; user: string; host_key_fingerprint: string | null; host_key_trusted: number; credential_id: string | null; tags: string | null; created_at: string; updated_at: string; }
 interface CredDbRow { id: string; name: string; type: CredentialType; secret_encrypted: Buffer | null; key_path: string | null; created_at: string; updated_at: string; }
@@ -92,6 +92,52 @@ export class SqliteStore implements Store {
     this.db.prepare('UPDATE shell_sessions SET status=?, writer_id=?, closed_at=? WHERE id = ?').run(status, writerId, closedAt, id);
     // mirror status onto the connection row
     this.db.prepare('UPDATE ssh_connections SET status = ?, closed_at = ? WHERE id = (SELECT connection_id FROM shell_sessions WHERE id = ?)').run(mapStatusToConn(status), closedAt, id);
+  }
+
+  // ------------------------------------------------------------------
+  // SFTP sessions.
+  // ------------------------------------------------------------------
+  private sftpSessionFromDbRow(r: any): SftpSession {
+    return {
+      id: r.id, hostId: r.hostId, credentialId: r.credentialId ?? null, rootPath: r.rootPath,
+      fingerprint: r.fingerprint ?? '', status: r.status, reason: r.reason ?? null,
+      lastActiveAt: r.lastActiveAt, closedAt: r.closedAt ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt,
+    };
+  }
+  createSftpSession(input: SftpSessionRecordInput): SftpSession {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const rec: SftpSession = { id, ...input, reason: null, closedAt: null };
+    this.db.prepare(
+      "INSERT INTO sftp_sessions (id, hostId, credentialId, rootPath, fingerprint, status, reason, lastActiveAt, closedAt, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(id, rec.hostId, rec.credentialId, rec.rootPath, rec.fingerprint, rec.status, rec.reason, rec.lastActiveAt, rec.closedAt, rec.createdAt, rec.updatedAt);
+    const row = this.db.prepare("SELECT * FROM sftp_sessions WHERE id = ?").get(id) as any;
+    return this.sftpSessionFromDbRow(row);
+  }
+  getSftpSession(id: string): SftpSession | null {
+    const row = this.db.prepare("SELECT * FROM sftp_sessions WHERE id = ?").get(id) as any;
+    return row ? this.sftpSessionFromDbRow(row) : null;
+  }
+  listSftpSessions(): SftpSession[] {
+    const rows = this.db.prepare("SELECT * FROM sftp_sessions ORDER BY createdAt DESC").all() as any[];
+    return rows.map((r) => this.sftpSessionFromDbRow(r));
+  }
+  updateSftpSession(id: string, fields: Partial<Pick<SftpSession, 'status' | 'reason' | 'fingerprint' | 'lastActiveAt' | 'closedAt' | 'updatedAt'>>): void {
+    const cur = this.db.prepare("SELECT * FROM sftp_sessions WHERE id = ?").get(id) as any;
+    if (!cur) return;
+    const next = this.sftpSessionFromDbRow(cur);
+    if (fields.status !== undefined) next.status = fields.status;
+    if (fields.reason !== undefined) next.reason = fields.reason;
+    if (fields.fingerprint !== undefined) next.fingerprint = fields.fingerprint;
+    if (fields.lastActiveAt !== undefined) next.lastActiveAt = fields.lastActiveAt;
+    if (fields.closedAt !== undefined) next.closedAt = fields.closedAt;
+    next.updatedAt = new Date().toISOString();
+    this.db.prepare(
+      "UPDATE sftp_sessions SET hostId = ?, credentialId = ?, rootPath = ?, fingerprint = ?, status = ?, reason = ?, lastActiveAt = ?, closedAt = ?, updatedAt = ? WHERE id = ?"
+    ).run(next.hostId, next.credentialId, next.rootPath, next.fingerprint, next.status, next.reason, next.lastActiveAt, next.closedAt, next.updatedAt, id);
+  }
+  deleteSftpSession(id: string): boolean {
+    return this.db.prepare("DELETE FROM sftp_sessions WHERE id = ?").run(id).changes > 0;
   }
 
   statusCounts() {

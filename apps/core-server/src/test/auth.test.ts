@@ -7,13 +7,14 @@ import { constantTimeTokenEquals, extractBearer } from '../auth.js';
 import { createApp, type AppHandle } from '../app.js';
 import { MemoryStore } from '@remotedeck/core/store';
 import { FakeTransport } from '@remotedeck/core/session/transport';
+import { FakeSftpTransport } from '@remotedeck/core/session/sftp-transport';
 import { WS_SUBPROTOCOL_PREFIX } from '@remotedeck/protocol';
 
 const MK = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const VALID_TOKEN = 'a'.repeat(MIN_API_TOKEN_LENGTH + 8);
 
 function buildDeps(config: ResolvedConfig) {
-  return { store: new MemoryStore(MK), transport: new FakeTransport(), config };
+  return { store: new MemoryStore(MK), transport: new FakeTransport(), sftpTransport: new FakeSftpTransport(), config };
 }
 async function buildApp(config: ResolvedConfig): Promise<{ handle: AppHandle; close: () => Promise<void> }> {
   const handle = createApp(buildDeps(config), { logger: false });

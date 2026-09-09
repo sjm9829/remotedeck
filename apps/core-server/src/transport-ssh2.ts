@@ -3,6 +3,7 @@ import type { ConnectConfig } from 'ssh2';
 import { EventEmitter } from 'node:events';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { SshTransport, ShellHandle, TransportTarget } from '@remotedeck/core/session/transport';
+import { connectSsh } from './ssh-connect.js';
 
 class SshShellHandle extends EventEmitter implements ShellHandle {
   closed = false;
@@ -24,17 +25,18 @@ class SshShellHandle extends EventEmitter implements ShellHandle {
  */
 export function toOpenSshFingerprint(rawHostKey: Buffer | string): string {
   const key = Buffer.isBuffer(rawHostKey) ? rawHostKey : Buffer.from(rawHostKey);
-  return 'SHA256:' + createHash('sha256').update(key).digest('base64');
+  // OpenSSH canonical form: base64 WITHOUT trailing '=' padding (ssh-keygen -lf).
+  return 'SHA256:' + createHash('sha256').update(key).digest('base64').replace(/=+$/g, '');
 }
 
 /** Constant-time string comparison (length-normalized via SHA-256 to avoid leaks). */
-function constantTimeEquals(a: string, b: string): boolean {
+export function constantTimeEquals(a: string, b: string): boolean {
   const ha = createHash('sha256').update(a).digest();
   const hb = createHash('sha256').update(b).digest();
   return timingSafeEqual(ha, hb);
 }
 
-function buildAuth(target: TransportTarget): Partial<ConnectConfig> {
+export function buildAuth(target: TransportTarget): Partial<ConnectConfig> {
   if (target.password) return { password: target.password };
   if (target.privateKey) return { privateKey: target.privateKey };
   const e = new Error('no_credential: target has neither password nor privateKey');
@@ -42,18 +44,6 @@ function buildAuth(target: TransportTarget): Partial<ConnectConfig> {
   throw e;
 }
 
-/**
- * Production SSH transport backed by ssh2.
- *
- * - observeFingerprint opens a real connection, captures the server host key in
- *   the hostVerifier during the handshake, and closes immediately WITHOUT
- *   authenticating or creating a shell. Resolves the OpenSSH fingerprint, or
- *   rejects on a connection-level error. The socket is cleaned up on every path.
- * - connectShell opens a real connection with the resolved credential. The
- *   hostVerifier compares the live host key to the trusted fingerprint
- *   constant-time; a mismatch fails closed (the connection is rejected before any
- *   shell can open).
- */
 export class Ssh2Transport implements SshTransport {
   private readonly readyTimeout = 10_000;
 
@@ -99,41 +89,11 @@ export class Ssh2Transport implements SshTransport {
   }
 
   async connectShell(target: TransportTarget, expectedFingerprint: string): Promise<ShellHandle> {
-    const auth = buildAuth(target); // throws not_supported if neither password nor privateKey
-    const conn = new Client();
-    let done = false;
-    const cleanup = (): void => { if (!done) { done = true; try { conn.destroy(); } catch { /* already destroyed */ } } };
-
-    await new Promise<void>((resolve, reject) => {
-      const onReady = (): void => { done = true; resolve(); };
-      const onError = (err: Error): void => { if (!done) { cleanup(); reject(err); } };
-      conn.once('ready', onReady);
-      conn.once('error', onError);
-      conn.once('close', () => onError(new Error('ssh_closed_before_ready')));
-      const config: ConnectConfig = {
-        host: target.host,
-        port: target.port,
-        username: target.username,
-        readyTimeout: this.readyTimeout,
-        keepaliveInterval: 10_000,
-        keepaliveCountMax: 3,
-        ...auth,
-        hostVerifier: (key: Buffer) => {
-          const fp = toOpenSshFingerprint(key);
-          return constantTimeEquals(fp, expectedFingerprint); // mismatch -> fail closed
-        },
-      };
-      try {
-        conn.connect(config);
-      } catch (err) {
-        onError(err as Error);
-      }
-    });
-
+    // Shared connect: auth + host-key-verify (fail-closed on mismatch) via connectSsh.
+    const conn = await connectSsh(target, { expectedFingerprint, keepaliveInterval: 10_000, keepaliveCountMax: 3 });
     const stream: any = await new Promise((resolve, reject) => {
       conn.shell({ term: 'xterm-256color', cols: 80, rows: 24 }, (err: any, s: any) => (err ? reject(err) : resolve(s)));
     });
-
     const handle = new SshShellHandle(conn, stream);
     stream.on('data', (d: Buffer) => handle.emit('output', d.toString('utf8')));
     stream.on('error', () => handle.close());

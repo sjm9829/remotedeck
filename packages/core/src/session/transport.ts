@@ -74,3 +74,23 @@ export class FakeTransport implements SshTransport {
     return h;
   }
 }
+
+/**
+ * Normalize a host-key fingerprint to the OpenSSH canonical form: keep the
+ * "SHA256:" prefix and strip any base64 padding ('='). OpenSSH (e.g.
+ * `ssh-keygen -lf`) reports the fingerprint WITHOUT padding, so this is how
+ * observed and stored values are compared safely (legacy stored values may
+ * still carry padding).
+ */
+export function normalizeFingerprint(fp: string): string {
+  if (typeof fp !== 'string') return '';
+  const colon = fp.indexOf(':');
+  const prefix = colon >= 0 ? fp.slice(0, colon + 1) : '';
+  const b64 = colon >= 0 ? fp.slice(colon + 1) : fp;
+  return prefix + b64.replace(/=+$/g, '');
+}
+
+/** Constant-value fingerprint equality on normalized forms (padding-insensitive). */
+export function fingerprintsEqual(a: string, b: string): boolean {
+  return normalizeFingerprint(a) === normalizeFingerprint(b);
+}

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, type JsonWebKey, type KeyObject } from 'node:crypto';
@@ -58,7 +59,8 @@ function startFixture(): Promise<Fixture> {
   const user = genRsaKey();
   const userKeyPem = user.privateKey.export({ type: 'pkcs1', format: 'pem' }) as string;
   const userPubBlob = rsaWireBlob(toJwk(user.publicKey));
-  const hostFingerprint = toOpenSshFingerprint(rsaWireBlob(toJwk(host.publicKey)));
+  // Independent OpenSSH fingerprint (not via toOpenSshFingerprint): base64(SHA256(wireBlob)), unpadded.
+  const hostFingerprint = 'SHA256:' + createHash('sha256').update(rsaWireBlob(toJwk(host.publicKey))).digest('base64').replace(/=+$/g, '');
 
   const server = new Server({ hostKeys: [hostKeyPem] }, (client: any) => {
     client.on('authentication', (ctx: any) => {
