@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { SshTransport, ShellHandle, TransportTarget } from '@remotedeck/core/session/transport';
 import { connectSsh } from './ssh-connect.js';
+import { mapConnectError } from './ssh-errors.js';
 
 class SshShellHandle extends EventEmitter implements ShellHandle {
   closed = false;
@@ -48,52 +49,55 @@ export class Ssh2Transport implements SshTransport {
   private readonly readyTimeout = 10_000;
 
   async observeFingerprint(target: TransportTarget): Promise<string> {
-    const conn = new Client();
+    // Shared connect (observe mode): KEX captures the host key; without credentials
+    // authentication fails after the KEX, which connectSsh treats as success once the
+    // fingerprint is seen. Connection-level failures map to stable, non-sensitive codes.
     let fp: string | null = null;
-    let settled = false;
-    const cleanup = (): void => { try { conn.destroy(); } catch { /* already destroyed */ } };
-    return await new Promise<string>((resolve, reject) => {
-      const finish = (ok: boolean): void => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        if (ok && fp) resolve(fp);
-        else reject(new Error('ssh_observe_failed'));
-      };
-      conn.on('ready', () => finish(true));
-      conn.on('close', () => finish(true));
-      conn.on('error', (err: Error) => {
-        // Without credentials, authentication fails after the key is exchanged;
-        // if we already observed the key that is success, else it is a real error.
-        if (fp) finish(true);
-        else { settled = true; cleanup(); reject(err); }
-      });
-      const config: ConnectConfig = {
-        host: target.host,
-        port: target.port,
-        username: target.username,
-        readyTimeout: this.readyTimeout,
+    let conn: Client;
+    try {
+      conn = await connectSsh(target, {
+        skipAuth: true,
+        resolveOnClose: true,
         keepaliveInterval: 0,
         keepaliveCountMax: 0,
-        hostVerifier: (key: Buffer) => {
-          fp = toOpenSshFingerprint(key);
-          return true;
-        },
-      };
-      try {
-        conn.connect(config);
-      } catch (err) {
-        finish(false);
-      }
-    });
+        readyTimeoutMs: this.readyTimeout,
+        onFingerprint: (f) => { fp = f; },
+      });
+    } catch (err) {
+      if (fp) return fp; // host key still observed before the connection closed
+      throw mapConnectError(err);
+    }
+    try { conn.end(); } catch { /* already ended */ }
+    if (!fp) { const e = new Error('ssh_observe_failed'); (e as any).code = 'unreachable'; throw e; }
+    return fp;
   }
 
   async connectShell(target: TransportTarget, expectedFingerprint: string): Promise<ShellHandle> {
     // Shared connect: auth + host-key-verify (fail-closed on mismatch) via connectSsh.
-    const conn = await connectSsh(target, { expectedFingerprint, keepaliveInterval: 10_000, keepaliveCountMax: 3 });
-    const stream: any = await new Promise((resolve, reject) => {
-      conn.shell({ term: 'xterm-256color', cols: 80, rows: 24 }, (err: any, s: any) => (err ? reject(err) : resolve(s)));
-    });
+    // Connection/auth/fingerprint/timeout errors map to stable, non-sensitive codes.
+    let conn: Client;
+    try {
+      conn = await connectSsh(target, {
+        expectedFingerprint,
+        keepaliveInterval: 10_000,
+        keepaliveCountMax: 3,
+        readyTimeoutMs: this.readyTimeout,
+      });
+    } catch (err) {
+      throw mapConnectError(err);
+    }
+    let stream: any;
+    try {
+      stream = await new Promise((resolve, reject) => {
+        conn.shell({ term: 'xterm-256color', cols: 80, rows: 24 }, (err: any, s: any) => (err ? reject(err) : resolve(s)));
+      });
+    } catch (err) {
+      try { conn.end(); } catch { /* already ended */ }
+      // Post-connect channel-open failure (not a connect/auth/fingerprint issue).
+      const e = err instanceof Error ? err : new Error('shell open failed');
+      if ((e as any).code === undefined) (e as any).code = 'subsystem_failed';
+      throw e;
+    }
     const handle = new SshShellHandle(conn, stream);
     stream.on('data', (d: Buffer) => handle.emit('output', d.toString('utf8')));
     stream.on('error', () => handle.close());

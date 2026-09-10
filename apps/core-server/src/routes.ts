@@ -138,15 +138,12 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     const b: any = req.body ?? {};
     if (!b.hostId) return fail(reply, 400, 'bad_request', 'hostId is required');
     if (!store.getHost(b.hostId)) return fail(reply, 404, 'not_found', 'host not found');
-    try {
-      const { session, requiresTrust, fingerprint } = await manager.createSession({ hostId: b.hostId, credentialId: b.credentialId ?? null });
-      if (requiresTrust) return reply.code(202).send({ data: { ...session, requiresTrust: true, fingerprint } });
-      return reply.code(201).send({ data: { ...session, requiresTrust: false } });
-    } catch (e: any) {
-      if (e.code === 'not_found') return fail(reply, 404, 'not_found', e.message);
-      if (e.code === 'not_supported') return fail(reply, 400, 'not_supported', e.message);
-      return fail(reply, 409, 'conflict', e.message);
-    }
+    // Let transport/credential errors propagate to the app error handler, which maps
+    // stable codes (not_found, not_supported, fingerprint_mismatch, auth_failed,
+    // timeout, unreachable) to consistent HTTP statuses — consistent with SFTP.
+    const { session, requiresTrust, fingerprint } = await manager.createSession({ hostId: b.hostId, credentialId: b.credentialId ?? null });
+    if (requiresTrust) return reply.code(202).send({ data: { ...session, requiresTrust: true, fingerprint } });
+    return reply.code(201).send({ data: { ...session, requiresTrust: false } });
   });
 
   app.post<{ Params: { id: string } }>('/api/sessions/:id/close', async (req, reply) => {

@@ -29,8 +29,12 @@ npm run build
 npm run dev:server
 ```
 
-`/healthz`만 무인증으로 응답하며, `/api/*`와 `/ws`는 `Authorization: Bearer <token>`
-(브라우저 WS는 `?token=` 쿼리 허용)이 없으면 401로 거부합니다.
+`/healthz`만 무인증으로 응답하며, `/api/*`는 `Authorization: Bearer <token>` 헤더가
+없으면 401로 거부됩니다. WebSocket(`/ws/sessions/:id`)은 API 토큰을 URL에 담지
+않고, 인증된 REST(`POST /api/sessions/:id/ws-ticket`)에서 발급한 **단일사용 단기
+ticket**을 `Sec-WebSocket-Protocol` 서브프로토콜(`remotedeck.v1.<ticket>`)로 제시해
+인증합니다. ticket가 없거나 이미 사용되었거나 만료되면 WS 핸드셰이크가 401로
+거부됩니다.
 
 ### 개발 클라이언트
 

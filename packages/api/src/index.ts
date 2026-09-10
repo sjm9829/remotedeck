@@ -1,7 +1,7 @@
-import type { Host, Credential, SshConnection, ShellSession, SessionAttachment } from '@remotedeck/types';
+import type { Host, Credential, SshSession, SshConnection, ShellSession, SessionAttachment, SessionState } from '@remotedeck/types';
 
 // Re-export types for convenience
-export type { Host, Credential, SshConnection, ShellSession, SessionAttachment };
+export type { Host, Credential, SshSession, SshConnection, ShellSession, SessionAttachment, SessionState };
 
 // API response wrappers
 export interface ApiResponse<T> {
@@ -55,8 +55,11 @@ export interface CreateCredentialRequest {
 
 export interface CreateSessionRequest {
   hostId: string;
-  credentialId: string;
-  title?: string;
+  /**
+   * Session-level credential override. Optional and nullable: when omitted/null the
+   * host's default credential is used. The REST contract reads `credentialId ?? null`.
+   */
+  credentialId?: string | null;
 }
 
 export interface TrustHostRequest {
@@ -66,4 +69,21 @@ export interface TrustHostRequest {
 export interface ResizeRequest {
   rows: number;
   cols: number;
+}
+
+// ---- Session response shapes (match the core-server REST contract) ----------
+/**
+ * POST /api/sessions response body, as a discriminated union on `requiresTrust`:
+ * - `202` + `requiresTrust: true`  -> the host key is not yet trusted; `fingerprint`
+ *   is the observed value the caller must trust (always present).
+ * - `201` + `requiresTrust: false` -> the session is immediately ready.
+ */
+export type CreateSessionResponse =
+  | { data: SshSession & { requiresTrust: true; fingerprint: string } }
+  | { data: SshSession & { requiresTrust: false } };
+
+/** POST /api/sessions/:id/ws-ticket response body: a single-use, short-lived ticket
+ *  presented on the WS handshake via the Sec-WebSocket-Protocol subprotocol. */
+export interface WsTicketResponse {
+  data: { ticket: string; sessionId: string; role: 'writer' | 'viewer'; expiresAt: string };
 }

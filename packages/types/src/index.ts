@@ -1,6 +1,16 @@
 export type HostStatus = 'pending_key' | 'trusted' | 'revoked';
-export type ConnectionStatus = 'connecting' | 'active' | 'closing' | 'closed' | 'error';
-export type SessionStatus = 'active' | 'detached' | 'closed';
+// Lifecycle of an SSH session, mirroring the core store / protocol SessionState.
+// A session is a single entity: it carries the connection lifecycle AND the
+// active writer lease (writerId is null when no writer is attached).
+export type SessionState =
+  | 'creating'
+  | 'awaiting-trust'
+  | 'connecting'
+  | 'active'
+  | 'detached'
+  | 'closing'
+  | 'closed'
+  | 'failed';
 export type CredentialType = 'key' | 'agent' | 'password';
 export type AttachmentDirection = 'upload' | 'download';
 export type ViewerRole = 'writer' | 'viewer';
@@ -29,29 +39,27 @@ export interface Credential {
   // secret_encrypted is never exposed in API responses
 }
 
-export interface SshConnection {
+/**
+ * An SSH session as returned by the REST API (GET/POST /api/sessions). This is the
+ * single session entity from the core store (SessionRow): it has one lifecycle
+ * `state`, a nullable `credentialId` (session-level override; null when the host
+ * default is used), and a nullable `writerId` (the current writer lease; null when
+ * detached or no writer).
+ */
+export interface SshSession {
   id: string;
   hostId: string;
-  credentialId: string;
-  status: ConnectionStatus;
-  openedAt: string;
-  closedAt: string | null;
-  lastError: string | null;
-}
-
-export interface ShellSession {
-  id: string;
-  connectionId: string;
-  title: string | null;
-  writerId: string;
-  status: SessionStatus;
-  termSize: { rows: number; cols: number };
-  scrollbackLimit: number;
+  credentialId: string | null;
+  state: SessionState;
+  writerId: string | null;
   createdAt: string;
-  detachedAt: string | null;
-  reattachedAt: string | null;
+  updatedAt: string;
   closedAt: string | null;
 }
+// Back-compatible aliases: the core contract models one session, so both former
+// names refer to the same shape.
+export type SshConnection = SshSession;
+export type ShellSession = SshSession;
 
 export interface SessionViewer {
   id: string;

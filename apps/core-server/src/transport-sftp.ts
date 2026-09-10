@@ -20,6 +20,7 @@ import type { SFTPWrapper, Stats } from 'ssh2';
 import type { SftpTransport, SftpHandle, DirEntry, FileStat, SftpUploadOptions, RemoteFileType, TransportTarget } from '@remotedeck/core';
 import { parentPath } from '@remotedeck/core';
 import { connectSsh } from './ssh-connect.js';
+import { mapConnectError } from './ssh-errors.js';
 
 const STATUS_NO_SUCH_FILE = 2;
 const STATUS_PERMISSION_DENIED = 3;
@@ -46,26 +47,6 @@ function typeFromPerms(perms: number): RemoteFileType {
  * `fingerprint_mismatch` is only used when the host-key verifier actually rejected
  * the host key; bad credentials, unreachable hosts, and timeouts keep distinct codes.
  */
-function mapConnectError(err: unknown): Error {
-  const e = err as any;
-  const msg: string = typeof e?.message === 'string' ? e.message : String(e?.message ?? 'connection failed');
-  const level: string | undefined = e?.level;
-  const code: string | undefined = e?.code;
-  // Host key rejected by the verifier (ssh2 fatal handshake error).
-  if (level === 'handshake' || /^host denied/i.test(msg))
-    return Object.assign(new Error(msg || 'fingerprint_mismatch'), { code: 'fingerprint_mismatch' });
-  // Authentication failed (wrong password / key / no acceptable method).
-  if (level === 'client-authentication' || /authentication.*failed/i.test(msg))
-    return Object.assign(new Error('authentication failed'), { code: 'auth_failed' });
-  // No usable credential (thrown by buildAuth before the socket opens).
-  if (code === 'not_supported')
-    return Object.assign(new Error(msg), { code: 'not_supported' });
-  // Our own ready-timeout guard (or a socket-level TCP timeout).
-  if (msg === 'ssh_connect_timeout' || code === 'ETIMEDOUT')
-    return Object.assign(new Error('connection timed out'), { code: 'timeout' });
-  // Everything else at connect time is a network/socket-level failure.
-  return Object.assign(new Error(msg || 'host unreachable'), { code: 'unreachable' });
-}
 
 class SftpHandleImpl extends EventEmitter implements SftpHandle {
   private sftp: SFTPWrapper;

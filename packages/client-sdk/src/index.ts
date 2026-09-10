@@ -2,6 +2,8 @@
 // memory; nothing is persisted to localStorage. WebSocket auth uses a single-use
 // ticket via the Sec-WebSocket-Protocol subprotocol (never a URL query token).
 import type { WsMessage } from '@remotedeck/protocol';
+import type { SshSession } from '@remotedeck/types';
+import type { CreateSessionResponse, WsTicketResponse } from '@remotedeck/api';
 import type { Readable } from 'node:stream';
 
 export interface ClientConfig { baseUrl: string; token: string; }
@@ -38,14 +40,14 @@ export class RemoteDeckClient {
     return (await j(await fetch(`${this.baseUrl}/api/credentials`, { method: 'POST', headers: this.headers(), body: JSON.stringify(b) }))).data;
   }
 
-  async listSessions(): Promise<any[]> { return (await j(await fetch(`${this.baseUrl}/api/sessions`, { headers: this.headers() }))).data; }
-  async createSession(b: { hostId: string; credentialId?: string }): Promise<any> {
+  async listSessions(): Promise<SshSession[]> { return (await j(await fetch(`${this.baseUrl}/api/sessions`, { headers: this.headers() }))).data; }
+  async createSession(b: { hostId: string; credentialId?: string | null }): Promise<CreateSessionResponse['data']> {
     return (await j(await fetch(`${this.baseUrl}/api/sessions`, { method: 'POST', headers: this.headers(), body: JSON.stringify(b) }))).data;
   }
-  async closeSession(id: string): Promise<any> {
+  async closeSession(id: string): Promise<SshSession> {
     return (await j(await fetch(`${this.baseUrl}/api/sessions/${id}/close`, { method: 'POST', headers: this.headers() }))).data;
   }
-  async wsTicket(sessionId: string, role: 'writer' | 'viewer' = 'writer'): Promise<{ ticket: string; role: string; expiresAt: string }> {
+  async wsTicket(sessionId: string, role: 'writer' | 'viewer' = 'writer'): Promise<WsTicketResponse['data']> {
     return (await j(await fetch(`${this.baseUrl}/api/sessions/${sessionId}/ws-ticket`, { method: 'POST', headers: this.headers(), body: JSON.stringify({ role }) }))).data;
   }
 
