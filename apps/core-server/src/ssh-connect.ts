@@ -60,7 +60,11 @@ export function connectSsh(target: TransportTarget, opts: ConnectSshOptions = {}
     if (resolveOnClose) client.once('close', onSettled);
     // In observe mode (skipAuth / resolveOnClose) the client may fail auth after the
     // KEX has already captured the host key; treat that as success (fingerprint seen).
-    client.once('error', (e) => {
+    // Use a PERSISTENT 'error' handler (with a settled-guard) because connection-level
+    // errors (e.g. ECONNRESET during teardown) can fire AFTER the promise has settled
+    // and must not become uncaught exceptions.
+    client.on('error', (e) => {
+      if (done) return;
       if (resolveOnClose && fpSeen) onSettled();
       else { clearTimeout(timer); fail(e); }
     });

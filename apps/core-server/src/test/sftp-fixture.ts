@@ -57,7 +57,24 @@ function longnameFor(name: string, node: MemFsNode): string {
   return perms + ' 1 root root ' + node.data.length + ' ' + name;
 }
 
-export async function startSftpFixture(opts: { hostKeyPem: string; hostKeyWire: Buffer; userKeyBlob?: Buffer; username?: string; password?: string; root: string; seed?: Map<string, MemFsNode> }): Promise<SftpFixtureHandle> {
+export interface SftpFixtureOptions {
+  hostKeyPem: string;
+  hostKeyWire: Buffer;
+  userKeyBlob?: Buffer;
+  username?: string;
+  password?: string;
+  root: string;
+  seed?: Map<string, MemFsNode>;
+  /**
+   * Fail WRITE operations once more than this many writes have been served
+   * (return SFTP_FAILURE). 0/undefined = never fail. Used to exercise the
+   * premature write-stream close path (a failed SFTP WRITE surfaces as a
+   * write-stream 'close' with the Writable marked errored, not an 'error').
+   */
+  failWriteAfter?: number;
+}
+
+export async function startSftpFixture(opts: SftpFixtureOptions): Promise<SftpFixtureHandle> {
   if (!opts || !opts.hostKeyPem) throw new Error('hostKeyPem required');
   const fs = new Map<string, MemFsNode>();
   const setDir = (p: string): void => { fs.set(p, { type: 'directory', data: Buffer.alloc(0), target: '' }); };
@@ -157,9 +174,17 @@ export async function startSftpFixture(opts: { hostKeyPem: string; hostKeyWire: 
             name(id, out);
           });
 
+          // POSIX lstat: follow intermediate symlinks, do NOT follow the final
+          // component (so a symlink leaf still reports as a symlink).
+          const lstatResolve = (raw: string): string => {
+            const n = normPath(raw);
+            const base = n.split('/').pop() ?? '';
+            const parent = parentOf(n);
+            const parentCanon = parent === '/' ? '/' : realpath(parent);
+            return parentCanon === '/' ? '/' + base : parentCanon + '/' + base;
+          };
           sftp.on('LSTAT', (id: number, p: Buffer) => {
-            const n = normPath(p.toString());
-            const node = fs.get(n);
+            const node = fs.get(lstatResolve(p.toString()));
             if (!node) return status(id, 2);
             attrs(id, attrsFor(node));
           });
@@ -202,6 +227,8 @@ export async function startSftpFixture(opts: { hostKeyPem: string; hostKeyWire: 
             if (!rec) return status(id, 2);
             state.writes++;
             if (rec.path.startsWith('.') && rec.path.includes('.rd-tmp-')) state.tempWrites.push(rec.path);
+            // Optional write failure (exercises premature write-stream close).
+            if (opts.failWriteAfter !== undefined && state.writes > opts.failWriteAfter) return status(id, 4); // SFTP_FAILURE
             const node = fs.get(rec.path)!;
             const data = Buffer.alloc(off + buf.length);
             node.data.copy(data, 0);

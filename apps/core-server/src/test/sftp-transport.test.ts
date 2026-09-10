@@ -74,7 +74,7 @@ function seedFs(): Map<string, any> {
   return m;
 }
 
-async function buildHarness(opts: { trusted?: boolean; seed?: Map<string, any>; idleMs?: number } = {}): Promise<Harness> {
+async function buildHarness(opts: { trusted?: boolean; seed?: Map<string, any>; idleMs?: number; failWriteAfter?: number } = {}): Promise<Harness> {
   const host = genRsaKey();
   const hostKeyPem = host.privateKey.export({ type: 'pkcs1', format: 'pem' }) as string;
   const user = genRsaKey();
@@ -85,7 +85,7 @@ async function buildHarness(opts: { trusted?: boolean; seed?: Map<string, any>; 
 
   const fixture = await startSftpFixture({
     hostKeyPem, hostKeyWire, userKeyBlob, username: USERNAME, password: PASSWORD,
-    root: '/root', seed: opts.seed ?? seedFs(),
+    root: '/root', seed: opts.seed ?? seedFs(), failWriteAfter: opts.failWriteAfter,
   });
   const store = new MemoryStore(MASTER_KEY);
   const cred = store.createCredential({ name: 'pw', type: 'password', secret: PASSWORD, keyPath: null });
@@ -353,5 +353,199 @@ describe('sftp auth (password + key + fingerprint mismatch)', () => {
     await assert.rejects(h.manager.create({ hostId: h.hostId, rootPath: '/root' }), (e) => code(e) === 'fingerprint_mismatch');
     await h.manager.dispose();
     await h.fixture.stop();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Slice 3B: SFTP root-confinement hardening regressions.
+//
+// These use the REAL in-process ssh2/SFTP fixture (loopback) to prove the
+// fail-closed symlink-confinement invariants: symlink parents, missing parents,
+// canonical roots that themselves traverse a symlink, abort/temp cleanup, and
+// premature write-stream close.
+// ---------------------------------------------------------------------------
+
+const extLinkSeed = (): Map<string, any> => {
+  const m = new Map<string, any>();
+  m.set('/root/link', link('/outside'));
+  m.set('/outside', dir());
+  m.set('/root/src.txt', file('src\n'));
+  return m;
+};
+
+const extFileSeed = (): Map<string, any> => {
+  const m = new Map<string, any>();
+  m.set('/root/ext', link('/out'));
+  m.set('/out', dir());
+  m.set('/out/f.txt', file('top-secret\n'));
+  return m;
+};
+
+const canonicalRootSeed = (): Map<string, any> => {
+  const m = new Map<string, any>();
+  m.set('/root/linkroot', link('/actual'));
+  m.set('/actual', dir());
+  m.set('/actual/hello.txt', file('hello\n'));
+  m.set('/actual/escape', link('/outside'));
+  m.set('/outside', dir());
+  m.set('/outside/secret.txt', file('top-secret\n'));
+  return m;
+};
+
+describe('sftp root confinement: external symlink parent + missing leaf', () => {
+  let h: Harness;
+  before(async () => { h = await buildHarness({ trusted: true, seed: extLinkSeed() }); });
+  after(async () => { await h.manager.dispose(); await h.fixture.stop(); });
+
+  it('mkdir under a symlink parent rejects outside_root and creates nothing outside', async () => {
+    const id = await createReady(h);
+    await assert.rejects(h.manager.mkdir(id, 'link/new'), (e) => code(e) === 'outside_root');
+    assert.ok(!h.fixture.fs.has('/outside/new'), 'must not create outside the root');
+    assert.ok(h.fixture.fs.has('/root/link'));
+  });
+
+  it('upload under a symlink parent rejects outside_root and writes nothing outside', async () => {
+    const id = await createReady(h);
+    await assert.rejects(
+      h.manager.upload(id, Readable.from(Buffer.from('x')), 'link/new-file'),
+      (e) => code(e) === 'outside_root',
+    );
+    assert.ok(!h.fixture.fs.has('/outside/new-file'), 'must not write outside the root');
+    const tmpLeft = [...h.fixture.fs.keys()].filter((k) => k.includes('.rd-tmp-'));
+    assert.deepEqual(tmpLeft, [], 'no temp file should be left behind');
+  });
+
+  it('rename destination under a symlink parent rejects outside_root; source preserved', async () => {
+    const id = await createReady(h);
+    await assert.rejects(
+      h.manager.rename(id, 'src.txt', 'link/new-name'),
+      (e) => code(e) === 'outside_root',
+    );
+    assert.ok(!h.fixture.fs.has('/outside/new-name'), 'must not create outside the root');
+    assert.ok(h.fixture.fs.has('/root/src.txt'), 'source must be preserved');
+  });
+});
+
+describe('sftp root confinement: external symlink, existing file', () => {
+  let h: Harness;
+  before(async () => { h = await buildHarness({ trusted: true, seed: extFileSeed() }); });
+  after(async () => { await h.manager.dispose(); await h.fixture.stop(); });
+
+  it('list/stat/download/rename-source of a path behind an external symlink reject outside_root', async () => {
+    const id = await createReady(h);
+    await assert.rejects(h.manager.listFiles(id, 'ext'), (e) => code(e) === 'outside_root');
+    await assert.rejects(h.manager.stat(id, 'ext/f.txt'), (e) => code(e) === 'outside_root');
+    await assert.rejects(h.manager.download(id, 'ext/f.txt'), (e) => code(e) === 'outside_root');
+    await assert.rejects(h.manager.rename(id, 'ext/f.txt', 'x.txt'), (e) => code(e) === 'outside_root');
+    assert.ok(h.fixture.fs.has('/out/f.txt'), 'outside target must be untouched');
+  });
+
+  it('unlink of a file reached through an external symlink parent rejects outside_root', async () => {
+    const id = await createReady(h);
+    await assert.rejects(h.manager.unlink(id, 'ext/f.txt'), (e) => code(e) === 'outside_root');
+    assert.ok(h.fixture.fs.has('/out/f.txt'), 'outside target must not be deleted');
+  });
+
+  it('unlink of the symlink itself succeeds and leaves the outside target intact', async () => {
+    const id = await createReady(h);
+    await h.manager.unlink(id, 'ext');
+    assert.ok(!h.fixture.fs.has('/root/ext'), 'the symlink itself should be removed');
+    assert.ok(h.fixture.fs.has('/out'), 'the outside directory target must remain');
+    assert.ok(h.fixture.fs.has('/out/f.txt'), 'the outside file target must remain');
+  });
+});
+
+describe('sftp root confinement: missing / inaccessible parent fails closed', () => {
+  let h: Harness;
+  before(async () => { h = await buildHarness({ trusted: true }); });
+  after(async () => { await h.manager.dispose(); await h.fixture.stop(); });
+
+  it('mkdir under a missing parent rejects no_such_file (fail-closed), no outside write', async () => {
+    const id = await createReady(h);
+    await assert.rejects(h.manager.mkdir(id, 'nosuch/new'), (e) => code(e) === 'no_such_file');
+    assert.ok(!h.fixture.fs.has('/root/nosuch/new'), 'nothing should be created');
+  });
+
+  it('upload under a missing parent rejects no_such_file (fail-closed)', async () => {
+    const id = await createReady(h);
+    await assert.rejects(
+      h.manager.upload(id, Readable.from(Buffer.from('x')), 'missing/file'),
+      (e) => code(e) === 'no_such_file',
+    );
+    const tmpLeft = [...h.fixture.fs.keys()].filter((k) => k.includes('.rd-tmp-'));
+    assert.deepEqual(tmpLeft, [], 'no temp file should be left behind');
+  });
+});
+
+describe('sftp root confinement: canonical root traversing a symlink', () => {
+  let h: Harness;
+  before(async () => { h = await buildHarness({ trusted: true, seed: canonicalRootSeed() }); });
+  after(async () => { await h.manager.dispose(); await h.fixture.stop(); });
+
+  it('a session rooted at a symlink behaves consistently and stays confined', async () => {
+    const id = await createReady(h, '/root/linkroot');
+    const listing = await h.manager.listFiles(id, '');
+    assert.deepEqual(listing.map((e) => e.name).sort(), ['escape', 'hello.txt']);
+    const st = await h.manager.stat(id, 'hello.txt');
+    assert.equal(st.type, 'file');
+    const dl = await h.manager.download(id, 'hello.txt');
+    const parts: Buffer[] = []; for await (const c of dl) parts.push(c as Buffer);
+    assert.equal(Buffer.concat(parts).toString(), 'hello\n');
+    await h.manager.upload(id, Readable.from(Buffer.from('new\n')), 'new.txt');
+    assert.ok(h.fixture.fs.has('/actual/new.txt'), 'upload must land in the canonical root');
+    assert.ok(!h.fixture.fs.has('/root/linkroot/new.txt'), 'no lexical (non-canonical) write');
+    await h.manager.rename(id, 'hello.txt', 'renamed.txt');
+    assert.ok(h.fixture.fs.has('/actual/renamed.txt'));
+    assert.ok(!h.fixture.fs.has('/actual/hello.txt'));
+    await h.manager.mkdir(id, 'subdir');
+    assert.ok(h.fixture.fs.has('/actual/subdir'));
+    await assert.rejects(h.manager.listFiles(id, 'escape'), (e) => code(e) === 'outside_root');
+  });
+});
+
+describe('sftp upload: source abort + premature write-stream close', () => {
+  it('an aborted source leaves no .rd-tmp-* and is not reported as success', async () => {
+    const h = await buildHarness({ trusted: true });
+    const id = await createReady(h);
+    let pushed = false;
+    const src = new Readable({
+      read() {
+        if (!pushed) {
+          pushed = true;
+          this.push(Buffer.alloc(2048, 7));
+          process.nextTick(() => src.destroy());
+        }
+      },
+    });
+    const err = await h.manager.upload(id, src, 'abort.bin').then(
+      () => { throw new Error('expected upload to reject'); },
+      (e: unknown) => e,
+    );
+    assert.ok(err, 'upload should reject when the source is aborted');
+    const tmpLeft = [...h.fixture.fs.keys()].filter((k) => k.includes('.rd-tmp-'));
+    assert.deepEqual(tmpLeft, [], 'no temp file should be left behind');
+    assert.ok(!h.fixture.fs.has('/root/abort.bin'), 'destination must not be created');
+    await h.manager.dispose();
+    await h.fixture.stop();
+  });
+
+  it('a premature remote write-stream close is not reported as success', async () => {
+    const harness = await buildHarness({ trusted: true, failWriteAfter: 1 });
+    const id = await createReady(harness);
+    const chunks = [Buffer.alloc(512, 1), Buffer.alloc(512, 2), Buffer.alloc(512, 3), Buffer.alloc(512, 4)];
+    let outcome: string;
+    try {
+      await harness.manager.upload(id, Readable.from(chunks), 'fail.bin');
+      outcome = 'RESOLVED';
+    } catch (e) {
+      outcome = 'REJECTED: ' + (e as Error).message;
+    }
+    assert.ok(outcome.startsWith('REJECTED'), `upload must not be reported as success on a failed write (outcome=${outcome}, writes=${harness.fixture.state.writes})`);
+    const tmpLeft = [...harness.fixture.fs.keys()].filter((k) => k.includes('.rd-tmp-'));
+    assert.deepEqual(tmpLeft, [], 'no temp file should be left behind');
+    assert.ok(!harness.fixture.fs.has('/root/fail.bin'), 'destination must not be (atomically) created');
+    await harness.manager.dispose();
+    await harness.fixture.stop();
   });
 });

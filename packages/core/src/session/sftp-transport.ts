@@ -114,9 +114,11 @@ class FakeSftpHandle extends EventEmitter implements SftpHandle {
   close(): void { if (!this.isClosed) { this.isClosed = true; this.emit('close'); } }
 
   private norm(p: string): string {
-    // Resolve a relative (to-root) path to an absolute key, mirroring resolveWithinRoot.
+    // Resolve a path to an absolute key, mirroring resolveWithinRoot. The manager
+    // passes absolute (root-anchored) paths, but also accept relative-to-root paths
+    // for direct (unit) callers.
     if (p === '' || p === '.' || p === '/') return this.root;
-    const joined = this.root + '/' + p;
+    const joined = p.startsWith('/') ? p : (this.root + '/' + p);
     const parts = joined.split('/');
     const stack: string[] = [];
     for (const part of parts) {

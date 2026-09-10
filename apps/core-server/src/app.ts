@@ -43,6 +43,7 @@ const CODE_STATUS: Record<string, number> = {
   permission_denied: 403, sftp_failure: 500,
   session_closed: 409, session_not_found: 404,
   sftp_connect_failed: 502, fingerprint_mismatch: 409, unreachable: 502,
+  auth_failed: 502, timeout: 502, subsystem_failed: 502, not_supported: 400,
   host_not_found: 404, invalid_credential: 400,
 };
 
