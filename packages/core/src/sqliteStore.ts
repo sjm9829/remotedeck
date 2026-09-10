@@ -5,7 +5,7 @@ import type { Store, HostRow, CredentialRow, SessionRow, NewHost, NewCredential,
 
 interface HostDbRow { id: string; name: string; hostname: string; port: number; user: string; host_key_fingerprint: string | null; host_key_trusted: number; credential_id: string | null; tags: string | null; created_at: string; updated_at: string; }
 interface CredDbRow { id: string; name: string; type: CredentialType; secret_encrypted: Buffer | null; key_path: string | null; created_at: string; updated_at: string; }
-interface SessionDbRow { id: string; connection_id: string; writer_id: string | null; status: string; closed_at: string | null; host_id: string | null; credential_id: string | null; }
+interface SessionDbRow { id: string; connection_id: string; writer_id: string | null; status: string; closed_at: string | null; host_id: string | null; credential_id: string | null; created_at: string; updated_at: string; }
 
 function now(): string { return new Date().toISOString(); }
 function mapHost(r: HostDbRow): HostRow {
@@ -73,23 +73,23 @@ export class SqliteStore implements Store {
     this.db.prepare('INSERT INTO ssh_connections (id, host_id, credential_id, status, opened_at) VALUES (?,?,?,?,?)')
       .run(connId, s.hostId, s.credentialId, mapStatusToConn(s.state), ts);
     const sid = randomUUID();
-    this.db.prepare('INSERT INTO shell_sessions (id, connection_id, writer_id, status, created_at) VALUES (?,?,?,?,?)')
-      .run(sid, connId, s.writerId, s.state, ts);
+    this.db.prepare('INSERT INTO shell_sessions (id, connection_id, writer_id, status, created_at, updated_at) VALUES (?,?,?,?,?,?)')
+      .run(sid, connId, s.writerId, s.state, ts, ts);
     return this.getSession(sid)!;
   }
   getSession(id: string): SessionRow | null {
-    const r = this.db.prepare('SELECT s.id AS id, s.connection_id AS connection_id, s.writer_id AS writer_id, s.status AS status, s.closed_at AS closed_at, h.id AS host_id, c.id AS credential_id FROM shell_sessions s JOIN ssh_connections sc ON sc.id = s.connection_id JOIN hosts h ON h.id = sc.host_id LEFT JOIN credentials c ON c.id = sc.credential_id WHERE s.id = ?').get(id) as SessionDbRow | undefined;
+    const r = this.db.prepare('SELECT s.id AS id, s.connection_id AS connection_id, s.writer_id AS writer_id, s.status AS status, s.closed_at AS closed_at, s.created_at AS created_at, s.updated_at AS updated_at, h.id AS host_id, c.id AS credential_id FROM shell_sessions s JOIN ssh_connections sc ON sc.id = s.connection_id JOIN hosts h ON h.id = sc.host_id LEFT JOIN credentials c ON c.id = sc.credential_id WHERE s.id = ?').get(id) as SessionDbRow | undefined;
     return r ? mapSession(r) : null;
   }
   listSessions(): SessionRow[] {
-    return (this.db.prepare('SELECT s.id AS id, s.connection_id AS connection_id, s.writer_id AS writer_id, s.status AS status, s.closed_at AS closed_at, h.id AS host_id, c.id AS credential_id FROM shell_sessions s JOIN ssh_connections sc ON sc.id = s.connection_id JOIN hosts h ON h.id = sc.host_id LEFT JOIN credentials c ON c.id = sc.credential_id ORDER BY s.created_at DESC').all() as SessionDbRow[]).map(mapSession);
+    return (this.db.prepare('SELECT s.id AS id, s.connection_id AS connection_id, s.writer_id AS writer_id, s.status AS status, s.closed_at AS closed_at, s.created_at AS created_at, s.updated_at AS updated_at, h.id AS host_id, c.id AS credential_id FROM shell_sessions s JOIN ssh_connections sc ON sc.id = s.connection_id JOIN hosts h ON h.id = sc.host_id LEFT JOIN credentials c ON c.id = sc.credential_id ORDER BY s.created_at DESC').all() as SessionDbRow[]).map(mapSession);
   }
   updateSession(id: string, f: Partial<Pick<SessionRow, 'state' | 'writerId' | 'closedAt'>>): void {
     const cur = this.db.prepare('SELECT status FROM shell_sessions WHERE id = ?').get(id) as { status: string } | undefined; if (!cur) return;
     const status = f.state ?? cur.status;
     const writerId = f.writerId !== undefined ? f.writerId : (this.db.prepare('SELECT writer_id FROM shell_sessions WHERE id = ?').get(id) as { writer_id: string | null }).writer_id;
     const closedAt = f.closedAt !== undefined ? f.closedAt : (this.db.prepare('SELECT closed_at FROM shell_sessions WHERE id = ?').get(id) as { closed_at: string | null }).closed_at;
-    this.db.prepare('UPDATE shell_sessions SET status=?, writer_id=?, closed_at=? WHERE id = ?').run(status, writerId, closedAt, id);
+    this.db.prepare('UPDATE shell_sessions SET status=?, writer_id=?, closed_at=?, updated_at=? WHERE id = ?').run(status, writerId, closedAt, now(), id);
     // mirror status onto the connection row
     this.db.prepare('UPDATE ssh_connections SET status = ?, closed_at = ? WHERE id = (SELECT connection_id FROM shell_sessions WHERE id = ?)').run(mapStatusToConn(status), closedAt, id);
   }
@@ -148,11 +148,12 @@ export class SqliteStore implements Store {
 }
 
 function mapStatusToConn(state: string): string {
-  if (state === 'active') return 'active';
-  if (state === 'connecting') return 'connecting';
-  if (state === 'closed' || state === 'failed') return 'closed';
+  if (state === 'active' || state === 'detached') return 'active';
+  if (state === 'closing') return 'closing';
+  if (state === 'closed') return 'closed';
+  if (state === 'failed') return 'error';
   return 'connecting';
 }
 function mapSession(r: SessionDbRow): SessionRow {
-  return { id: r.id, hostId: r.host_id!, credentialId: r.credential_id, state: r.status as SessionState, writerId: r.writer_id, createdAt: '', updatedAt: '', closedAt: r.closed_at };
+  return { id: r.id, hostId: r.host_id!, credentialId: r.credential_id, state: r.status as SessionState, writerId: r.writer_id, createdAt: r.created_at, updatedAt: r.updated_at, closedAt: r.closed_at };
 }

@@ -50,6 +50,16 @@ export class SessionManager extends EventEmitter {
   writerOf(id: string): string | null { return this.runtimes.get(id)?.writerId ?? null; }
   viewersOf(id: string): string[] { return [...(this.runtimes.get(id)?.viewers.keys() ?? [])]; }
 
+  /** A server process cannot reattach its in-memory SSH handles after restart. */
+  recover(): SessionRow[] {
+    const stale = this.opts.store.listSessions().filter((session) => !['closed', 'failed'].includes(session.state));
+    const closedAt = new Date().toISOString();
+    for (const session of stale) {
+      this.opts.store.updateSession(session.id, {state: 'closed', writerId: null, closedAt});
+    }
+    return stale;
+  }
+
   /**
    * Resolve the transport target for a session. The session-level credentialId
    * (override) takes priority over the host's default credential. The credential
@@ -167,6 +177,7 @@ export class SessionManager extends EventEmitter {
         const e = new Error('writer_lease_taken'); (e as any).code = 'conflict'; throw e;
       }
       rt.writerId = attachment.id;
+      this.opts.store.updateSession(rt.id, {writerId: attachment.id});
       if (rt.state === 'detached') { this.clearIdle(rt); this.setState(rt, 'active'); }
     } else {
       rt.viewers.set(attachment.id, attachment);
@@ -197,6 +208,7 @@ export class SessionManager extends EventEmitter {
     if (att.role === 'writer') rt.viewers.delete(attachmentId);
     if (rt.writerId === attachmentId) {
       rt.writerId = null;
+      this.opts.store.updateSession(rt.id, {writerId: null});
       this.setState(rt, 'detached');
       this.startIdle(rt); // SSH connection is kept alive during detachment
     }
@@ -210,6 +222,7 @@ export class SessionManager extends EventEmitter {
     const from = rt.attachments.get(fromAttachmentId)!;
     const to = rt.attachments.get(toAttachmentId)!;
     rt.writerId = to.id;
+    this.opts.store.updateSession(rt.id, {writerId: to.id});
     // former writer becomes a viewer
     rt.viewers.set(from.id, from);
     this.emit('writer_transferred', sessionId, from.id, to.id);
@@ -223,6 +236,7 @@ export class SessionManager extends EventEmitter {
     rt.shell?.close();
     for (const a of rt.attachments.values()) a.close?.(1000, 'closed');
     rt.attachments.clear(); rt.viewers.clear();
+    rt.writerId = null;
     this.setState(rt, 'closed');
   }
 
@@ -252,8 +266,26 @@ export class SessionManager extends EventEmitter {
   private clearIdle(rt: Runtime): void { if (rt.idleTimer) { clearTimeout(rt.idleTimer); rt.idleTimer = null; } }
   private setState(rt: Runtime, state: SessionState): void {
     rt.state = state;
-    this.opts.store.updateSession(rt.id, { state });
+    const terminal = state === 'closed' || state === 'failed';
+    this.opts.store.updateSession(rt.id, {
+      state,
+      ...(terminal ? {writerId: null, closedAt: new Date().toISOString()} : {}),
+    });
     this.emit('state', rt.id, state);
     for (const a of rt.attachments.values()) a.send({ type: 'status', data: { status: state } });
+  }
+
+  dispose(): void {
+    for (const rt of this.runtimes.values()) {
+      this.clearIdle(rt);
+      try { rt.shell?.close(); } catch {}
+      for (const attachment of rt.attachments.values()) attachment.close?.(1001, 'server shutdown');
+      rt.attachments.clear();
+      rt.viewers.clear();
+      rt.writerId = null;
+      if (rt.state !== 'closed' && rt.state !== 'failed') this.setState(rt, 'closed');
+    }
+    this.runtimes.clear();
+    this.removeAllListeners();
   }
 }

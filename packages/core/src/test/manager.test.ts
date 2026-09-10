@@ -57,6 +57,7 @@ describe('writer lease + viewers', () => {
     const sid = (await mgr.createSession({ hostId: host.id })).session.id;
     const w = fakeAttachment('w', 'writer'); mgr.attach(sid, w.att);
     assert.equal(mgr.writerOf(sid), 'w');
+    assert.equal(store.getSession(sid)?.writerId, 'w', 'writer lease must be durable');
     mgr.input('w', 'ls\r');
     assert.deepEqual(transport.shells.get('h:22:u')!.writes, ['ls\r']);
     mgr.resize('w', 40, 120);
@@ -66,6 +67,7 @@ describe('writer lease + viewers', () => {
     assert.throws(() => mgr.attach(sid, fakeAttachment('w2', 'writer').att), (e: any) => e.code === 'conflict'); // single writer lease
     mgr.transferWriter(sid, 'w', 'v');
     assert.equal(mgr.writerOf(sid), 'v');
+    assert.equal(store.getSession(sid)?.writerId, 'v', 'writer transfer must be durable');
     mgr.input('v', 'y');
     assert.deepEqual(transport.shells.get('h:22:u')!.writes, ['ls\r', 'y']);
   });
@@ -94,6 +96,7 @@ describe('detach / reattach / idle timeout / close', () => {
     const w = fakeAttachment('w', 'writer'); mgr.attach(sid, w.att);
     mgr.detach('w');
     assert.equal(mgr.getState(sid), 'detached');
+    assert.equal(store.getSession(sid)?.writerId, null, 'detached writer lease must be cleared durably');
     assert.equal(transport.shells.get('h:22:u')!.closed, false, 'SSH kept alive while detached');
     // reattach
     const w2 = fakeAttachment('w2', 'writer'); mgr.attach(sid, w2.att);
@@ -114,6 +117,26 @@ describe('detach / reattach / idle timeout / close', () => {
     await mgr.closeSession(sid);
     assert.equal(mgr.getState(sid), 'closed');
     assert.equal(transport.shells.get('h:22:u')!.closed, true);
+    assert.ok(store.getSession(sid)?.closedAt);
+  });
+
+  it('restart recovery closes stale durable sessions without inventing live runtimes', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const oldManager = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    transport.setFingerprint({ host: 'h', port: 22, username: 'u' }, 'SHA256:x');
+    const host = store.createHost({ name: 'h', hostname: 'h', port: 22, username: 'u', credentialId: null, tags: [], hostKeyFingerprint: 'SHA256:x', hostKeyTrusted: true });
+    const sid = (await oldManager.createSession({ hostId: host.id })).session.id;
+    oldManager.attach(sid, fakeAttachment('writer-before-restart', 'writer').att);
+
+    const restarted = new SessionManager({store, transport: new FakeTransport(), idleTimeoutMs: 5000});
+    const stale = restarted.recover();
+
+    assert.deepEqual(stale.map((session) => session.id), [sid]);
+    assert.equal(store.getSession(sid)?.state, 'closed');
+    assert.equal(store.getSession(sid)?.writerId, null);
+    assert.ok(store.getSession(sid)?.closedAt);
+    assert.equal(restarted.getState(sid), null);
+    oldManager.dispose();
   });
 });
 
