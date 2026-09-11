@@ -162,7 +162,7 @@ export async function startSftpFixture(opts: SftpFixtureOptions): Promise<SftpFi
             if (!rec) return status(id, 2);
             if (rec.read) return status(id, STATUS_EOF); // EOF after the single batch
             rec.read = true;
-            const prefix = rec.path + '/';
+            const prefix = rec.path === '/' ? '/' : rec.path + '/';
             const out: any[] = [];
             for (const [key, val] of fs.entries()) {
               if (key === rec.path || !key.startsWith(prefix)) continue;

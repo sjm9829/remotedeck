@@ -10,6 +10,7 @@ services:
       - REMOTEDECK_API_TOKEN=${REMOTEDECK_API_TOKEN}
       - REMOTEDECK_ALLOWED_ORIGINS=${REMOTEDECK_ALLOWED_ORIGINS}
       - PORT=4100
+      - REMOTEDECK_LISTEN_HOST=0.0.0.0
       - DATABASE_PATH=/data/remotedeck.db
     volumes:
       - remotedeck-data:/data

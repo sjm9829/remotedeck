@@ -8,6 +8,14 @@ import { SessionManager, type Attachment } from '../session/manager.js';
 
 const MK = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// Protocol contract: every server->client WS message carries an ISO-8601 ts.
+const ISO_TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+function assertWireTs(ts: unknown, what: string): void {
+  assert.equal(typeof ts, 'string', `${what} ts must be a string`);
+  const iso = ts as string;
+  assert.match(iso, ISO_TS, `${what} ts must be ISO-8601`);
+  assert.ok(!Number.isNaN(Date.parse(iso)), `${what} ts must parse`);
+}
 function fakeAttachment(id: string, role: 'writer' | 'viewer'): { att: Attachment; inbox: any[] } {
   const inbox: any[] = [];
   return { inbox, att: { id, role, send: (m) => inbox.push(m), close: () => {} } };
@@ -81,8 +89,8 @@ describe('writer lease + viewers', () => {
     const w = fakeAttachment('w', 'writer'); mgr.attach(sid, w.att);
     const v = fakeAttachment('v', 'viewer'); mgr.attach(sid, v.att);
     transport.shells.get('h:22:u')!.emitOutput('hello');
-    assert.ok(w.inbox.some((m) => m.type === 'output' && m.data === 'hello'));
-    assert.ok(v.inbox.some((m) => m.type === 'output' && m.data === 'hello'));
+    assert.ok(w.inbox.some((m) => m.type === 'output' && m.data?.data === 'hello'));
+    assert.ok(v.inbox.some((m) => m.type === 'output' && m.data?.data === 'hello'));
   });
 });
 
@@ -153,8 +161,63 @@ describe('multi-session isolation', () => {
     const wa = fakeAttachment('wa', 'writer'); mgr.attach(sa, wa.att);
     const wb = fakeAttachment('wb', 'writer'); mgr.attach(sb, wb.att);
     transport.shells.get('a:22:u')!.emitOutput('A');
-    assert.ok(wa.inbox.some((m) => m.data === 'A'));
-    assert.ok(!wb.inbox.some((m) => m.data === 'A'), 'session b must not receive session a output');
+    assert.ok(wa.inbox.some((m) => m.type === 'output' && m.data?.data === 'A'));
+    assert.ok(!wb.inbox.some((m) => m.type === 'output' && m.data?.data === 'A'), 'session b must not receive session a output');
+  });
+});
+
+describe('server->client WS wire contract (type, ISO ts, data shape)', () => {
+  it('output, scrollback, status all follow the protocol contract', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const mgr = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    transport.setFingerprint({ host: 'h', port: 22, username: 'u' }, 'SHA256:x');
+    const host = store.createHost({ name: 'h', hostname: 'h', port: 22, username: 'u', credentialId: null, tags: [], hostKeyFingerprint: 'SHA256:x', hostKeyTrusted: true });
+    const sid = (await mgr.createSession({ hostId: host.id })).session.id;
+    const w = fakeAttachment('w', 'writer');
+    mgr.attach(sid, w.att);
+
+    // status on attach: {type:'status', ts, data:{status}}
+    const st = w.inbox.find((m) => m.type === 'status');
+    assert.ok(st, 'attach must send status');
+    assertWireTs(st.ts, 'status');
+    assert.deepEqual(st.data, { status: 'active' });
+
+    // output: {type:'output', ts, data:{data:string}}
+    transport.shells.get('h:22:u')!.emitOutput('hello');
+    const out = w.inbox.find((m) => m.type === 'output');
+    assert.ok(out, 'output must reach attachments');
+    assertWireTs(out.ts, 'output');
+    assert.deepEqual(out.data, { data: 'hello' });
+
+    // scrollback replay + status on second attach
+    const v = fakeAttachment('v', 'viewer');
+    mgr.attach(sid, v.att);
+    const st2 = v.inbox.find((m) => m.type === 'status');
+    assert.ok(st2, 'second attach must send status');
+    assertWireTs(st2.ts, 'status');
+    assert.equal(st2.data.status, 'active');
+    const sb = v.inbox.find((m) => m.type === 'scrollback');
+    assert.ok(sb, 'scrollback replay must be sent');
+    assertWireTs(sb.ts, 'scrollback');
+    assert.equal(typeof sb.data.data, 'string');
+    assert.ok(sb.data.data.includes('hello'), 'scrollback must carry buffered output');
+  });
+
+  it('status transitions broadcast the contract shape to live attachments', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const mgr = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    transport.setFingerprint({ host: 'h', port: 22, username: 'u' }, 'SHA256:x');
+    const host = store.createHost({ name: 'h', hostname: 'h', port: 22, username: 'u', credentialId: null, tags: [], hostKeyFingerprint: 'SHA256:x', hostKeyTrusted: true });
+    const sid = (await mgr.createSession({ hostId: host.id })).session.id;
+    const w = fakeAttachment('w', 'writer');
+    mgr.attach(sid, w.att);
+    const v = fakeAttachment('v', 'viewer');
+    mgr.attach(sid, v.att);
+    v.inbox.length = 0; // only observe transition broadcasts
+    mgr.detach('w');
+    const msgs = v.inbox.filter((m) => m.type === 'status');
+    assert.ok(msgs.some((m) => m.data.status === 'detached'), 'detach must broadcast status to surviving attachments');
+    for (const m of msgs) { assertWireTs(m.ts, 'status'); assert.equal(typeof m.data.status, 'string'); }
   });
 });
 

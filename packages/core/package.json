@@ -61,6 +61,7 @@
     "test": "node --test dist/test/**/*.test.js"
   },
   "dependencies": {
+    "@remotedeck/protocol": "*",
     "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { Store, SessionState, SessionRow, CredentialType } from '../store.js';
 import type { SshTransport, ShellHandle, TransportTarget } from './transport.js';
 import { RingBuffer } from './ringbuffer.js';
+import type { WsOutputMessage, WsScrollbackMessage, WsStatusMessage } from '@remotedeck/protocol';
 
 export interface Attachment {
   id: string;
@@ -154,7 +155,8 @@ export class SessionManager extends EventEmitter {
     rt.shell = shell;
     shell.on('output', (data: string) => {
       rt.buffer.push(data);
-      for (const a of rt.attachments.values()) a.send({ type: 'output', data });
+      const msg: WsOutputMessage = { type: 'output', ts: new Date().toISOString(), data: { data } };
+      for (const a of rt.attachments.values()) a.send(msg);
     });
     shell.on('close', () => {
       if (rt.state !== 'closing') { this.clearIdle(rt); this.setState(rt, 'closed'); }
@@ -184,9 +186,13 @@ export class SessionManager extends EventEmitter {
       this.emit('viewer_joined', sessionId, attachment.id);
     }
     // Confirm attachment state, then replay scrollback to the new client.
-    attachment.send({ type: 'status', data: { status: rt.state } });
+    const status: WsStatusMessage = { type: 'status', ts: new Date().toISOString(), data: { status: rt.state } };
+    attachment.send(status);
     const scrollback = rt.buffer.toString();
-    if (scrollback) attachment.send({ type: 'scrollback', data: scrollback });
+    if (scrollback) {
+      const msg: WsScrollbackMessage = { type: 'scrollback', ts: new Date().toISOString(), data: { data: scrollback } };
+      attachment.send(msg);
+    }
     return { role: attachment.role };
   }
 
@@ -272,7 +278,8 @@ export class SessionManager extends EventEmitter {
       ...(terminal ? {writerId: null, closedAt: new Date().toISOString()} : {}),
     });
     this.emit('state', rt.id, state);
-    for (const a of rt.attachments.values()) a.send({ type: 'status', data: { status: state } });
+    const status: WsStatusMessage = { type: 'status', ts: new Date().toISOString(), data: { status: state } };
+    for (const a of rt.attachments.values()) a.send(status);
   }
 
   dispose(): void {

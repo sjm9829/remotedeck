@@ -22,8 +22,8 @@ async function main(): Promise<void> {
   const stale = sftpManager.recover();
   if (stale.length > 0) console.log(`[sftp] cleaned ${stale.length} stale session(s)`);
   attachWebSocketServer();
-  await app.listen({ port: config.port, host: '0.0.0.0' });
-  console.log(`RemoteDeck core-server listening on :${config.port}`);
+  await app.listen({ port: config.port, host: config.listenHost });
+  console.log(`RemoteDeck core-server listening on ${config.listenHost}:${config.port}`);
   const shutdown = (): void => {
     try { manager.dispose(); } catch { /* */ }
     try { sftpManager.dispose(); } catch { /* */ }

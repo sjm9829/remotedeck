@@ -92,7 +92,9 @@ class SftpHandleImpl extends EventEmitter implements SftpHandle {
   // ---- root confinement ----------------------------------------------------
   private isWithinRoot(canonical: string): boolean {
     const root = this.rootCanonical;
-    return root !== null && (canonical === root || canonical.startsWith(root + '/'));
+    if (root === null) return false;
+    if (root === '/') return canonical.startsWith('/');
+    return canonical === root || canonical.startsWith(root + '/');
   }
 
   /** Canonicalize the session root once; fail-closed if it is not an accessible directory. */

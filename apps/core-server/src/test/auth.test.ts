@@ -35,6 +35,35 @@ describe('config fail-closed validation', () => {
     const c = resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN, REMOTEDECK_ALLOWED_ORIGINS: 'http://localhost:5173, https://deck.example.com' });
     assert.deepEqual(c.allowedOrigins, ['http://localhost:5173', 'https://deck.example.com']);
   });
+  it('defaults listen host to loopback when unset', () => {
+    const c = resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN });
+    assert.equal(c.listenHost, '127.0.0.1');
+  });
+  it('treats empty/whitespace listen host as loopback default', () => {
+    const c = resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN, REMOTEDECK_LISTEN_HOST: '   ' });
+    assert.equal(c.listenHost, '127.0.0.1');
+  });
+  it('accepts an explicit loopback IPv4 listen host', () => {
+    const c = resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN, REMOTEDECK_LISTEN_HOST: '127.0.0.1' });
+    assert.equal(c.listenHost, '127.0.0.1');
+  });
+  it('accepts an explicit all-interfaces IPv4 listen host (Docker/compose)', () => {
+    const c = resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN, REMOTEDECK_LISTEN_HOST: '0.0.0.0' });
+    assert.equal(c.listenHost, '0.0.0.0');
+  });
+  it('accepts an explicit IPv6 listen host', () => {
+    const c = resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN, REMOTEDECK_LISTEN_HOST: '::' });
+    assert.equal(c.listenHost, '::');
+  });
+  it('rejects a hostname as listen host (fail closed)', () => {
+    assert.throws(() => resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN, REMOTEDECK_LISTEN_HOST: 'localhost' }));
+  });
+  it('rejects a malformed listen host (fail closed)', () => {
+    assert.throws(() => resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN, REMOTEDECK_LISTEN_HOST: '999.1.1.1' }));
+  });
+  it('rejects a listen host with an embedded port (fail closed)', () => {
+    assert.throws(() => resolveConfig({ REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN, REMOTEDECK_LISTEN_HOST: '127.0.0.1:4100' }));
+  });
 });
 
 describe('auth helpers', () => {

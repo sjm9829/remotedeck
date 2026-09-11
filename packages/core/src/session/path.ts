@@ -72,9 +72,12 @@ export function resolveWithinRoot(rootPath: string, relPath: string): string {
   const candidate = (relPath === '' || relPath === '.') ? '.' : relPath;
   if (candidate !== '.' && candidate.startsWith('/'))
     throw new RemotePathError('path must be relative to the session root', 'invalid_path');
-  const joined = candidate === '.' ? root : root + '/' + candidate;
+  const relative = normalizePosixPath(candidate);
+  if (relative === '..' || relative.startsWith('../'))
+    throw new RemotePathError('path escapes the session root', 'outside_root');
+  const joined = candidate === '.' ? root : root === '/' ? '/' + candidate : root + '/' + candidate;
   const normalized = normalizePosixPath(joined);
-  if (normalized !== root && !normalized.startsWith(root + '/'))
+  if (root !== '/' && normalized !== root && !normalized.startsWith(root + '/'))
     throw new RemotePathError('path escapes the session root', 'outside_root');
   return normalized;
 }

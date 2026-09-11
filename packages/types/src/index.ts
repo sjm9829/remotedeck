@@ -20,7 +20,8 @@ export interface Host {
   name: string;
   hostname: string;
   port: number;
-  user: string;
+  /** Login name returned by the server's persisted host record. */
+  username: string;
   hostKeyFingerprint: string | null;
   hostKeyTrusted: boolean;
   credentialId: string | null;
@@ -34,6 +35,8 @@ export interface Credential {
   name: string;
   type: CredentialType;
   keyPath: string | null;
+  /** Whether an encrypted secret exists; the secret itself is never returned. */
+  hasSecret: boolean;
   createdAt: string;
   updatedAt: string;
   // secret_encrypted is never exposed in API responses

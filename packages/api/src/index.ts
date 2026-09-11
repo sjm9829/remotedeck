@@ -42,7 +42,16 @@ export interface CreateHostRequest {
   hostname: string;
   port?: number;
   user: string;
-  credentialId?: string;
+  credentialId?: string | null;
+  tags?: string[];
+}
+
+export interface UpdateHostRequest {
+  name?: string;
+  hostname?: string;
+  port?: number;
+  user?: string;
+  credentialId?: string | null;
   tags?: string[];
 }
 
@@ -51,6 +60,14 @@ export interface CreateCredentialRequest {
   type: 'key' | 'agent' | 'password';
   secret?: string;
   keyPath?: string;
+}
+
+export interface UpdateCredentialRequest {
+  name?: string;
+  type?: 'key' | 'agent' | 'password';
+  /** An empty secret intentionally leaves the existing server-side secret unchanged. */
+  secret?: string;
+  keyPath?: string | null;
 }
 
 export interface CreateSessionRequest {

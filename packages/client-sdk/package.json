@@ -13,7 +13,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-force-exit dist/test/*.test.js"
   },
   "dependencies": {
     "@remotedeck/types": "*",
@@ -21,6 +22,7 @@
     "@remotedeck/protocol": "*"
   },
   "devDependencies": {
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "@types/node": "^24.0.0"
   }
 }

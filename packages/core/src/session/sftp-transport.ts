@@ -118,7 +118,7 @@ class FakeSftpHandle extends EventEmitter implements SftpHandle {
     // passes absolute (root-anchored) paths, but also accept relative-to-root paths
     // for direct (unit) callers.
     if (p === '' || p === '.' || p === '/') return this.root;
-    const joined = p.startsWith('/') ? p : (this.root + '/' + p);
+    const joined = p.startsWith('/') ? p : (this.root === '/' ? '/' + p : this.root + '/' + p);
     const parts = joined.split('/');
     const stack: string[] = [];
     for (const part of parts) {
@@ -127,7 +127,7 @@ class FakeSftpHandle extends EventEmitter implements SftpHandle {
       stack.push(part);
     }
     const n = '/' + stack.join('/');
-    if (n !== this.root && !n.startsWith(this.root + '/'))
+    if (this.root !== '/' && n !== this.root && !n.startsWith(this.root + '/'))
       throw Object.assign(new Error('outside_root'), { code: 'outside_root' });
     return n;
   }

@@ -240,6 +240,28 @@ describe('sftp path safety (manager-enforced)', () => {
   });
 });
 
+describe('sftp filesystem-root confinement', () => {
+  it('lists a child below / while traversal above / remains denied', async () => {
+    const seed = seedFs();
+    seed.set('/', dir());
+    seed.set('/child', dir());
+    seed.set('/child/nested.txt', file('nested\n'));
+    const h = await buildHarness({ trusted: true, seed });
+    const id = await createReady(h, '/');
+
+    const rootNames = (await h.manager.listFiles(id, '')).map((entry) => entry.name);
+    assert.ok(rootNames.includes('child'));
+    const childNames = (await h.manager.listFiles(id, 'child')).map((entry) => entry.name);
+    assert.deepEqual(childNames, ['nested.txt']);
+    await assert.rejects(h.manager.listFiles(id, '../outside'), (e) => code(e) === 'outside_root');
+
+    await h.manager.close(id);
+    await h.fixture.stop();
+    await h.manager.dispose();
+    activeHarnesses.delete(h);
+  });
+});
+
 describe('sftp symlink escape (transport-enforced, fail-closed)', () => {
   let h: Harness;
   before(async () => { h = await buildHarness({ trusted: true }); });

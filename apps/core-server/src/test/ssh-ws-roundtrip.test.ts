@@ -5,9 +5,10 @@
 // session creation, WS ticket, writer attach, shell input/output, resize, detach
 // (SSH connection survives), re-attach with scrollback replay, and session close.
 // No external server or operational credential is used.
-// Wire shape note: output/scrollback payloads carry the raw string in `data`
-// (matching SessionManager and its core unit tests), while input/resize carry
-// nested objects as declared by the protocol package.
+// Wire shape: every server->client message follows the public protocol
+// contract {type, ts (ISO-8601), data} — output/scrollback carry
+// data:{data:string}, status carries data:{status, message?}, matching
+// @remotedeck/protocol (WsOutputMessage / WsScrollbackMessage / WsStatusMessage).
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import WebSocket from 'ws';
@@ -19,6 +20,12 @@ let fixture: SshFixture;
 let harness: AppHarness;
 
 const MSG_TIMEOUT_MS = 10_000;
+const ISO_TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+function assertWireTs(msg: any, what: string): void {
+  assert.equal(typeof msg.ts, 'string', `${what}: ts must be a string on the wire`);
+  assert.match(msg.ts, ISO_TS, `${what}: ts must be ISO-8601`);
+  assert.ok(!Number.isNaN(Date.parse(msg.ts)), `${what}: ts must parse`);
+}
 
 before(async () => {
   fixture = await startSshFixture();
@@ -128,17 +135,21 @@ test('REST -> SSH -> WS terminal roundtrip', async () => {
   const ticket: string = tk.body.data.ticket;
   let term = await wsTerm(sessionId, ticket);
   const st = await term.next((m) => m.type === 'status', 'status');
+  assertWireTs(st, 'status');
   assert.equal(st.data.status, 'active');
+  assert.equal(typeof (st.data as any).message, 'undefined');
 
   // 5. shell input roundtrips through the real SSH shell.
   term.send({ type: 'input', data: { data: 'hello' } });
-  const out = await term.next((m) => m.type === 'output' && String(m.data).includes('ECHO:hello'), 'ECHO output');
-  assert.ok(String(out.data).startsWith('ECHO:hello'));
+  const out = await term.next((m) => m.type === 'output' && typeof m.data?.data === 'string' && m.data.data.includes('ECHO:hello'), 'ECHO output');
+  assertWireTs(out, 'output');
+  assert.ok(out.data.data.startsWith('ECHO:hello'));
 
   // 6. resize reaches the SSH window-change path.
   term.send({ type: 'resize', data: { rows: 40, cols: 120 } });
-  const rz = await term.next((m) => m.type === 'output' && String(m.data).includes('RESIZE:40x120'), 'RESIZE output');
-  assert.ok(String(rz.data).startsWith('RESIZE:40x120'));
+  const rz = await term.next((m) => m.type === 'output' && typeof m.data?.data === 'string' && m.data.data.includes('RESIZE:40x120'), 'RESIZE output');
+  assertWireTs(rz, 'output');
+  assert.ok(rz.data.data.startsWith('RESIZE:40x120'));
 
   // 7. detach keeps the SSH connection alive (session -> detached).
   term.send({ type: 'detach', data: {} });
@@ -153,9 +164,11 @@ test('REST -> SSH -> WS terminal roundtrip', async () => {
   assert.equal(tk2.status, 200);
   term = await wsTerm(sessionId, tk2.body.data.ticket);
   const st2 = await term.next((m) => m.type === 'status', 're-attach status');
+  assertWireTs(st2, 'status');
   assert.equal(st2.data.status, 'active');
-  const sb = await term.next((m) => m.type === 'scrollback' && String(m.data).includes('ECHO:hello'), 'scrollback');
-  assert.ok(String(sb.data).includes('RESIZE:40x120'));
+  const sb = await term.next((m) => m.type === 'scrollback' && typeof m.data?.data === 'string' && m.data.data.includes('ECHO:hello'), 'scrollback');
+  assertWireTs(sb, 'scrollback');
+  assert.ok(sb.data.data.includes('RESIZE:40x120'));
 
   // 9. tickets are single-use: the redeemed ticket is rejected on a new upgrade.
   const stale = new WsTerm(sessionId, ticket);
