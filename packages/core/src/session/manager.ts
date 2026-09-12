@@ -17,6 +17,12 @@ export interface ManagerOptions {
   transport: SshTransport;
   scrollbackBytes?: number;
   idleTimeoutMs?: number;
+  /**
+   * Reconnect stale sessions on startup recovery when their host is still trusted
+   * and their credential resolves. Default true. When false, recovery only closes
+   * stale sessions (the pre-reconnect behavior).
+   */
+  autoReconnect?: boolean;
 }
 
 interface Runtime {
@@ -38,11 +44,13 @@ export class SessionManager extends EventEmitter {
   private runtimes = new Map<string, Runtime>();
   private scrollbackBytes: number;
   private idleTimeoutMs: number;
+  private readonly autoReconnect: boolean;
 
   constructor(private readonly opts: ManagerOptions) {
     super();
     this.scrollbackBytes = opts.scrollbackBytes ?? DEFAULT_SCROLLBACK_BYTES;
     this.idleTimeoutMs = opts.idleTimeoutMs ?? 300_000;
+    this.autoReconnect = opts.autoReconnect ?? true;
   }
 
   getState(id: string): SessionState | null { return this.runtimes.get(id)?.state ?? null; }
@@ -51,13 +59,43 @@ export class SessionManager extends EventEmitter {
   writerOf(id: string): string | null { return this.runtimes.get(id)?.writerId ?? null; }
   viewersOf(id: string): string[] { return [...(this.runtimes.get(id)?.viewers.keys() ?? [])]; }
 
-  /** A server process cannot reattach its in-memory SSH handles after restart. */
-  recover(): SessionRow[] {
+  /**
+   * Server-restart recovery.
+   *
+   * A restarted process cannot reattach its in-memory SSH handles, so every
+   * non-terminal session row is stale. With auto-reconnect (default), each stale
+   * session whose host is still trusted and whose credential resolves is reopened
+   * to a detached runtime (a fresh shell; scrollback is not replayed because the
+   * prior connection is gone), so a client can reattach by session id. Sessions
+   * that cannot be safely reopened (host gone, untrusted now, credential removed,
+   * or connect failure) are closed. With auto-reconnect disabled, all stale
+   * sessions are simply closed. Returns the stale rows that were examined.
+   */
+  async recover(): Promise<SessionRow[]> {
     const stale = this.opts.store.listSessions().filter((session) => !['closed', 'failed'].includes(session.state));
-    const closedAt = new Date().toISOString();
-    for (const session of stale) {
-      this.opts.store.updateSession(session.id, {state: 'closed', writerId: null, closedAt});
-    }
+    const closeStale = (id: string): void =>
+      this.opts.store.updateSession(id, { state: 'closed', writerId: null, closedAt: new Date().toISOString() });
+    await Promise.all(stale.map(async (session) => {
+      const host = this.opts.store.getHost(session.hostId);
+      const reconnectable = this.autoReconnect && !!host && host.hostKeyTrusted === true && !!host.hostKeyFingerprint;
+      if (!reconnectable) { closeStale(session.id); return; }
+      const rt: Runtime = {
+        id: session.id, hostId: session.hostId, credentialId: session.credentialId ?? null, state: 'creating',
+        shell: null, writerId: null, viewers: new Map(), attachments: new Map(),
+        buffer: new RingBuffer(this.scrollbackBytes), idleTimer: null,
+      };
+      this.runtimes.set(session.id, rt);
+      try {
+        await this.connect(rt, host!.hostKeyFingerprint!); // sets active; rethrows & fails on error
+        rt.writerId = null; // the previous writer's WS is gone; a reattaching client claims the lease
+        this.opts.store.updateSession(session.id, { writerId: null });
+        this.setState(rt, 'detached'); // no client attached yet: await reattach, or idle-close
+        this.startIdle(rt);
+      } catch {
+        this.runtimes.delete(session.id);
+        closeStale(session.id);
+      }
+    }));
     return stale;
   }
 

@@ -15,12 +15,13 @@ async function main(): Promise<void> {
   const store = new SqliteStore(db, config.masterKey);
   const transport = new Ssh2Transport();
   const sftpTransport = new SftpSsh2Transport();
-  const { app, attachWebSocketServer, manager, sftpManager } = createApp({ store, transport, sftpTransport, config }, { logger: true, idleTimeoutMs: config.idleTimeoutMs });
-  const staleShells = manager.recover();
-  if (staleShells.length > 0) console.log(`[ssh] cleaned ${staleShells.length} stale session(s)`);
-  // Clean up stale SFTP sessions left in the DB by a previous server run.
-  const stale = sftpManager.recover();
-  if (stale.length > 0) console.log(`[sftp] cleaned ${stale.length} stale session(s)`);
+  const { app, attachWebSocketServer, manager, sftpManager } = createApp({ store, transport, sftpTransport, config }, { logger: true, idleTimeoutMs: config.idleTimeoutMs, autoReconnect: config.autoReconnect });
+  // Server-restart recovery: reconnect stale sessions whose host is still trusted
+  // (when auto-reconnect is on), and close/error the rest.
+  const staleShells = await manager.recover();
+  if (staleShells.length > 0) console.log(`[ssh] recovered ${staleShells.length} stale session(s)`);
+  const stale = await sftpManager.recover();
+  if (stale.length > 0) console.log(`[sftp] recovered ${stale.length} stale session(s)`);
   attachWebSocketServer();
   await app.listen({ port: config.port, host: config.listenHost });
   console.log(`RemoteDeck core-server listening on ${config.listenHost}:${config.port}`);

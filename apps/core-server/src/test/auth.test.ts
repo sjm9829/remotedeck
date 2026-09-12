@@ -261,3 +261,24 @@ describe('REMOTEDECK_IDLE_TIMEOUT resolution', () => {
     assert.throws(() => resolveConfig({ ...base, REMOTEDECK_IDLE_TIMEOUT: '5m' }));
   });
 });
+
+describe('REMOTEDECK_AUTO_RECONNECT resolution', () => {
+  const base = { REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN };
+  it('defaults to enabled when unset', () => {
+    assert.equal(resolveConfig(base).autoReconnect, true);
+  });
+  it('accepts canonical truthy values', () => {
+    for (const v of ['true', 'TRUE', '1', 'yes', 'on', '  true  ']) {
+      assert.equal(resolveConfig({ ...base, REMOTEDECK_AUTO_RECONNECT: v }).autoReconnect, true, v);
+    }
+  });
+  it('accepts canonical falsy values', () => {
+    for (const v of ['false', 'FALSE', '0', 'no', 'off', '  false  ']) {
+      assert.equal(resolveConfig({ ...base, REMOTEDECK_AUTO_RECONNECT: v }).autoReconnect, false, v);
+    }
+  });
+  it('rejects unrecognized values (fail closed)', () => {
+    assert.throws(() => resolveConfig({ ...base, REMOTEDECK_AUTO_RECONNECT: 'maybe' }));
+    assert.throws(() => resolveConfig({ ...base, REMOTEDECK_AUTO_RECONNECT: '2' }));
+  });
+});

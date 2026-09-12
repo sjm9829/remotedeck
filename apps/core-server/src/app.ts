@@ -47,10 +47,10 @@ const CODE_STATUS: Record<string, number> = {
   host_not_found: 404, invalid_credential: 400,
 };
 
-export function createApp(deps: AppDeps, opts: { logger?: boolean; idleTimeoutMs?: number } = {}): AppHandle {
+export function createApp(deps: AppDeps, opts: { logger?: boolean; idleTimeoutMs?: number; autoReconnect?: boolean } = {}): AppHandle {
   const { config, store } = deps;
-  const manager = deps.manager ?? new SessionManager({ store, transport: deps.transport, idleTimeoutMs: opts.idleTimeoutMs });
-  const sftpManager = deps.sftpManager ?? new SftpSessionManager({ store, transport: deps.sftpTransport, idleTimeoutMs: opts.idleTimeoutMs });
+  const manager = deps.manager ?? new SessionManager({ store, transport: deps.transport, idleTimeoutMs: opts.idleTimeoutMs, autoReconnect: opts.autoReconnect });
+  const sftpManager = deps.sftpManager ?? new SftpSessionManager({ store, transport: deps.sftpTransport, idleTimeoutMs: opts.idleTimeoutMs, autoReconnect: opts.autoReconnect });
   const ticketStore = deps.ticketStore ?? new TicketStore();
 
   const app = Fastify({ logger: opts.logger ?? false });

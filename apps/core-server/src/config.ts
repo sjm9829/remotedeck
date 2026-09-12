@@ -20,6 +20,12 @@ export interface ResolvedConfig {
    * REMOTEDECK_IDLE_TIMEOUT; unset => DEFAULT_IDLE_TIMEOUT_MS.
    */
   idleTimeoutMs: number;
+  /**
+   * Auto-reconnect stale sessions after a server restart. When true (default),
+   * sessions whose host is still trusted are reconnected during startup recovery
+   * instead of being dropped. Sourced from REMOTEDECK_AUTO_RECONNECT; unset => true.
+   */
+  autoReconnect: boolean;
 }
 
 export const MIN_API_TOKEN_LENGTH = 32;
@@ -29,6 +35,9 @@ export const DEFAULT_LISTEN_HOST = '127.0.0.1';
 
 /** Default detached-session idle timeout (5 min). REMOTEDECK_IDLE_TIMEOUT overrides; 0 disables. */
 export const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
+
+/** Auto-reconnect on restart is enabled by default; REMOTEDECK_AUTO_RECONNECT can disable it. */
+export const DEFAULT_AUTO_RECONNECT = true;
 
 const MASTER_KEY_RE = /^[0-9a-f]{64}$/i;
 
@@ -68,6 +77,22 @@ function resolveIdleTimeoutMs(raw: string | undefined): number {
   return parseInt(value, 10);
 }
 
+/**
+ * Resolve the auto-reconnect-on-restart flag from REMOTEDECK_AUTO_RECONNECT.
+ * Unset/empty => enabled (DEFAULT_AUTO_RECONNECT). Recognized booleans are used;
+ * any other value is rejected so the recovery mode is always deterministic (fail closed).
+ */
+function resolveAutoReconnect(raw: string | undefined): boolean {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (value === '') return DEFAULT_AUTO_RECONNECT;
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  throw new Error(
+    'REMOTEDECK_AUTO_RECONNECT must be a boolean (true/false, or 1/0). ' +
+    'Refusing to start (fail closed).'
+  );
+}
+
 export function resolveConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig {
   const masterKey = (env.REMOTEDECK_MASTER_KEY ?? '').trim();
   if (!MASTER_KEY_RE.test(masterKey)) {
@@ -99,5 +124,6 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): ResolvedCon
     apiToken,
     allowedOrigins,
     idleTimeoutMs: resolveIdleTimeoutMs(env.REMOTEDECK_IDLE_TIMEOUT),
+    autoReconnect: resolveAutoReconnect(env.REMOTEDECK_AUTO_RECONNECT),
   };
 }

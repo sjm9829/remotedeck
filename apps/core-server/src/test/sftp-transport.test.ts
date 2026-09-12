@@ -321,15 +321,33 @@ describe('sftp session lifecycle', () => {
     await h.fixture.stop();
   });
 
-  it('stale cleanup: a restarted manager marks leftover ready sessions as error', async () => {
+  it('stale cleanup with auto-reconnect disabled marks leftover ready sessions as error', async () => {
     const h = await buildHarness({ trusted: true });
     const id = await createReady(h);
     assert.equal(h.store.getSftpSession(id)!.status, 'ready');
     // Simulate a server restart: a NEW manager over the SAME store (no live runtime).
-    const h2 = new SftpSessionManager({ store: h.store, transport: h.transport });
-    const stale = h2.recover();
+    const h2 = new SftpSessionManager({ store: h.store, transport: h.transport, autoReconnect: false });
+    const stale = await h2.recover();
     assert.ok(stale.some((s) => s.id === id), 'the ready session should be reported as stale');
     assert.equal(h.store.getSftpSession(id)!.status, 'error');
+    h2.dispose();
+    await h.manager.dispose();
+    await h.fixture.stop();
+  });
+
+  it('stale cleanup with auto-reconnect reopens a leftover ready session (reconnect)', async () => {
+    const h = await buildHarness({ trusted: true });
+    const id = await createReady(h);
+    assert.equal(h.store.getSftpSession(id)!.status, 'ready');
+    // Simulate a server restart: a NEW manager over the SAME store + live fixture, auto-reconnect ON.
+    const h2 = new SftpSessionManager({ store: h.store, transport: h.transport });
+    const stale = await h2.recover();
+    assert.ok(stale.some((s) => s.id === id), 'the ready session should be reported as stale');
+    assert.equal(h.store.getSftpSession(id)!.status, 'ready', 'a trusted host must be auto-reconnected to ready');
+    assert.equal(h2.isLive(id), true, 'the reconnected session must have a live runtime');
+    // The reconnected runtime actually serves file operations.
+    const listing = await h2.listFiles(id, '');
+    assert.ok(listing.some((e) => e.name === 'hello.txt'), 'reconnected runtime lists the seeded file');
     h2.dispose();
     await h.manager.dispose();
     await h.fixture.stop();

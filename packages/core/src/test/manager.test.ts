@@ -136,8 +136,8 @@ describe('detach / reattach / idle timeout / close', () => {
     const sid = (await oldManager.createSession({ hostId: host.id })).session.id;
     oldManager.attach(sid, fakeAttachment('writer-before-restart', 'writer').att);
 
-    const restarted = new SessionManager({store, transport: new FakeTransport(), idleTimeoutMs: 5000});
-    const stale = restarted.recover();
+    const restarted = new SessionManager({store, transport: new FakeTransport(), idleTimeoutMs: 5000, autoReconnect: false});
+    const stale = await restarted.recover();
 
     assert.deepEqual(stale.map((session) => session.id), [sid]);
     assert.equal(store.getSession(sid)?.state, 'closed');
@@ -145,6 +145,52 @@ describe('detach / reattach / idle timeout / close', () => {
     assert.ok(store.getSession(sid)?.closedAt);
     assert.equal(restarted.getState(sid), null);
     oldManager.dispose();
+  });
+
+  it('restart recovery with auto-reconnect reopens a stale trusted session to a detached runtime', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const oldManager = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    transport.setFingerprint({ host: 'h', port: 22, username: 'u' }, 'SHA256:x');
+    const host = store.createHost({ name: 'h', hostname: 'h', port: 22, username: 'u', credentialId: null, tags: [], hostKeyFingerprint: 'SHA256:x', hostKeyTrusted: true });
+    const sid = (await oldManager.createSession({ hostId: host.id })).session.id;
+    oldManager.attach(sid, fakeAttachment('writer-before-restart', 'writer').att);
+
+    // Simulate a server restart: a new manager with a new transport (no runtimes), auto-reconnect ON (default).
+    const restartedTransport = new FakeTransport();
+    restartedTransport.setFingerprint({ host: 'h', port: 22, username: 'u' }, 'SHA256:x');
+    const restarted = new SessionManager({ store, transport: restartedTransport, idleTimeoutMs: 5000 });
+    const stale = await restarted.recover();
+
+    assert.deepEqual(stale.map((s) => s.id), [sid], 'the active session should be reported as stale');
+    assert.equal(restarted.getState(sid), 'detached', 'reconnected session is detached (a fresh shell, awaiting reattach)');
+    assert.equal(store.getSession(sid)?.writerId, null, 'the dead writer lease must be cleared on reconnect');
+    // A client can reattach by id and become the writer (active).
+    const w = fakeAttachment('writer-after-restart', 'writer');
+    restarted.attach(sid, w.att);
+    assert.equal(restarted.getState(sid), 'active');
+    oldManager.dispose();
+    restarted.dispose();
+  });
+
+  it('restart recovery closes a stale session whose host is untrusted (cannot auto-reconnect)', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const oldManager = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    transport.setFingerprint({ host: 'h', port: 22, username: 'u' }, 'SHA256:x');
+    const host = store.createHost({ name: 'h', hostname: 'h', port: 22, username: 'u', credentialId: null, tags: [], hostKeyFingerprint: 'SHA256:x', hostKeyTrusted: true });
+    const sid = (await oldManager.createSession({ hostId: host.id })).session.id;
+
+    // Host key trust was revoked before the restart (e.g. host re-added untrusted).
+    store.setHostTrust(host.id, 'SHA256:x');
+    store.updateHost(host.id, { hostKeyTrusted: false });
+
+    const restarted = new SessionManager({ store, transport: new FakeTransport(), idleTimeoutMs: 5000 });
+    const stale = await restarted.recover();
+
+    assert.deepEqual(stale.map((s) => s.id), [sid]);
+    assert.equal(store.getSession(sid)?.state, 'closed', 'an untrusted host must not be auto-reconnected (fail closed)');
+    assert.equal(restarted.getState(sid), null);
+    oldManager.dispose();
+    restarted.dispose();
   });
 });
 

@@ -25,6 +25,12 @@ export interface SftpManagerDeps {
   clock?: () => number;
   logger?: (event: string, data?: Record<string, unknown>) => void;
   idleTimeoutMs?: number;
+  /**
+   * Reconnect stale SFTP sessions on startup recovery when their host is still
+   * trusted (the transport re-validates the stored host key on connect). Default
+   * true. When false, recovery only marks stale sessions as error (pre-reconnect).
+   */
+  autoReconnect?: boolean;
   onCleanup?: (fn: () => void) => void;
 }
 
@@ -61,6 +67,7 @@ export class SftpSessionManager extends EventEmitter {
   private readonly clock: () => number;
   private readonly logger: (event: string, data?: Record<string, unknown>) => void;
   private readonly idleTimeoutMs: number;
+  private readonly autoReconnect: boolean;
   private readonly runtimes = new Map<string, SftpRuntime>();
 
   constructor(deps: SftpManagerDeps) {
@@ -71,17 +78,48 @@ export class SftpSessionManager extends EventEmitter {
     this.clock = deps.clock ?? (() => Date.now());
     this.logger = deps.logger ?? (() => undefined);
     this.idleTimeoutMs = deps.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+    this.autoReconnect = deps.autoReconnect ?? true;
     deps.onCleanup?.(() => this.dispose());
   }
 
   private iso(ms: number): string { return new Date(ms).toISOString(); }
 
-  /** Mark stale DB SFTP sessions (no live runtime) as error; returns them. */
-  recover(): SftpSession[] {
+  /**
+   * Server-restart recovery for stale DB SFTP sessions (no live runtime).
+   *
+   * With auto-reconnect (default), each stale session whose host is still trusted
+   * and whose credential resolves is reopened: connectSftp re-validates the stored
+   * host key, so a host-key change makes the reconnect fail (fail closed) rather
+   * than silently reattaching to a different server. Sessions that cannot be
+   * reopened, and all sessions when auto-reconnect is disabled, are marked error.
+   * Returns the stale rows that were examined.
+   */
+  async recover(): Promise<SftpSession[]> {
     const nowMs = this.clock();
     const stale = this.store.listSftpSessions().filter((s) => s.status !== 'error' && !this.runtimes.has(s.id));
-    for (const s of stale)
-      this.store.updateSftpSession(s.id, { status: 'error', reason: 'sftp server restarted (stale session)', lastActiveAt: this.iso(nowMs), closedAt: this.iso(nowMs) });
+    const markStale = (s: SftpSession): void => {
+      const t = this.iso(this.clock());
+      this.store.updateSftpSession(s.id, { status: 'error', reason: 'sftp server restarted (stale session)', lastActiveAt: t, closedAt: t });
+    };
+    await Promise.all(stale.map(async (s) => {
+      const host = this.store.getHost(s.hostId);
+      const reconnectable = this.autoReconnect && !!host && host.hostKeyTrusted === true && !!host.hostKeyFingerprint;
+      if (!reconnectable) { markStale(s); return; }
+      let rt: SftpRuntime;
+      try {
+        const target = resolveTransportTarget(this.store, s.hostId, s.credentialId ?? null);
+        rt = new SftpRuntime({ hostId: s.hostId, credentialId: s.credentialId ?? null, rootPath: s.rootPath }, target, s.rootPath, this.clock());
+      } catch { markStale(s); return; } // host/credential no longer resolvable
+      this.runtimes.set(s.id, rt);
+      try {
+        await this.doConnect(rt, s.id, host!.hostKeyFingerprint!); // transport re-validates the host key
+        this.logger('sftp_session_reconnected', { id: s.id, hostId: s.hostId });
+      } catch (err: any) {
+        rt.closed = true; rt.handle?.close?.(); rt.handle = null; this.runtimes.delete(s.id);
+        markStale(s);
+        this.logger('sftp_session_reconnect_failed', { id: s.id, hostId: s.hostId, reason: String(err?.code ?? err?.message ?? 'connect_failed') });
+      }
+    }));
     return stale;
   }
 
