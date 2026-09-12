@@ -308,3 +308,19 @@ describe('credential mapping + session failed transitions', () => {
     assert.equal(mgr.getState(sid), 'failed');
   });
 });
+
+describe('idleTimeoutMs = 0 (unlimited keep-alive)', () => {
+  it('detached session is never idle-closed and keeps the SSH shell alive', async () => {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const mgr = new SessionManager({ store, transport, idleTimeoutMs: 0 });
+    transport.setFingerprint({ host: 'h', port: 22, username: 'u' }, 'SHA256:x');
+    const host = store.createHost({ name: 'h', hostname: 'h', port: 22, username: 'u', credentialId: null, tags: [], hostKeyFingerprint: 'SHA256:x', hostKeyTrusted: true });
+    const sid = (await mgr.createSession({ hostId: host.id })).session.id;
+    const w = fakeAttachment('w', 'writer'); mgr.attach(sid, w.att);
+    mgr.detach('w');
+    assert.equal(mgr.getState(sid), 'detached');
+    await sleep(400);
+    assert.equal(mgr.getState(sid), 'detached', 'must NOT close on idle when idleTimeoutMs <= 0');
+    assert.equal(transport.shells.get('h:22:u')!.closed, false, 'SSH shell must stay alive indefinitely');
+  });
+});

@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
 import type { FastifyInstance } from 'fastify';
-import { resolveConfig, MIN_API_TOKEN_LENGTH, type ResolvedConfig } from '../config.js';
+import { resolveConfig, MIN_API_TOKEN_LENGTH, DEFAULT_IDLE_TIMEOUT_MS, type ResolvedConfig } from '../config.js';
 import { constantTimeTokenEquals, extractBearer } from '../auth.js';
 import { createApp, type AppHandle } from '../app.js';
 import { MemoryStore } from '@remotedeck/core/store';
@@ -235,5 +235,29 @@ describe('WebSocket auth via ticket subprotocol', () => {
   it('rejects a connection with no ticket', async () => {
     const msg = await connect(null);
     assert.equal(msg, null, 'no ticket must be rejected');
+  });
+});
+
+describe('REMOTEDECK_IDLE_TIMEOUT resolution', () => {
+  const base = { REMOTEDECK_MASTER_KEY: MK, REMOTEDECK_API_TOKEN: VALID_TOKEN };
+  it('defaults to 300000 when unset', () => {
+    assert.equal(resolveConfig(base).idleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS);
+    assert.equal(DEFAULT_IDLE_TIMEOUT_MS, 300_000);
+  });
+  it('0 disables idle close (tmux-style unlimited keep-alive)', () => {
+    assert.equal(resolveConfig({ ...base, REMOTEDECK_IDLE_TIMEOUT: '0' }).idleTimeoutMs, 0);
+  });
+  it('accepts a positive integer value verbatim', () => {
+    assert.equal(resolveConfig({ ...base, REMOTEDECK_IDLE_TIMEOUT: '60000' }).idleTimeoutMs, 60000);
+  });
+  it('trims surrounding whitespace', () => {
+    assert.equal(resolveConfig({ ...base, REMOTEDECK_IDLE_TIMEOUT: '  120000  ' }).idleTimeoutMs, 120000);
+  });
+  it('rejects negative values (fail closed)', () => {
+    assert.throws(() => resolveConfig({ ...base, REMOTEDECK_IDLE_TIMEOUT: '-1' }));
+  });
+  it('rejects non-numeric values (fail closed)', () => {
+    assert.throws(() => resolveConfig({ ...base, REMOTEDECK_IDLE_TIMEOUT: 'abc' }));
+    assert.throws(() => resolveConfig({ ...base, REMOTEDECK_IDLE_TIMEOUT: '5m' }));
   });
 });

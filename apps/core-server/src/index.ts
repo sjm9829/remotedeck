@@ -15,7 +15,7 @@ async function main(): Promise<void> {
   const store = new SqliteStore(db, config.masterKey);
   const transport = new Ssh2Transport();
   const sftpTransport = new SftpSsh2Transport();
-  const { app, attachWebSocketServer, manager, sftpManager } = createApp({ store, transport, sftpTransport, config }, { logger: true });
+  const { app, attachWebSocketServer, manager, sftpManager } = createApp({ store, transport, sftpTransport, config }, { logger: true, idleTimeoutMs: config.idleTimeoutMs });
   const staleShells = manager.recover();
   if (staleShells.length > 0) console.log(`[ssh] cleaned ${staleShells.length} stale session(s)`);
   // Clean up stale SFTP sessions left in the DB by a previous server run.

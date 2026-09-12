@@ -311,6 +311,8 @@ export class SftpSessionManager extends EventEmitter {
 
   private startIdleTimer(rt: SftpRuntime, id: string): void {
     this.clearIdleTimer(rt);
+    // idleTimeoutMs <= 0 disables idle close: keep the detached SFTP session open indefinitely.
+    if (this.idleTimeoutMs <= 0) return;
     const timer = setTimeout(() => {
       const current = this.runtimes.get(id);
       if (!current || current.closed || current.status !== 'ready') return;

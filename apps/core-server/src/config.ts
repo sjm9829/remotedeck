@@ -13,12 +13,22 @@ export interface ResolvedConfig {
   apiToken: string;
   /** Explicit CORS allow-list. Empty => same-origin only. */
   allowedOrigins: string[];
+  /**
+   * Detached-session idle timeout in milliseconds. A detached SSH/SFTP session
+   * with no attached client is closed after this much idle time. `0` disables the
+   * idle timeout entirely (sessions are kept indefinitely, tmux-style). Sourced from
+   * REMOTEDECK_IDLE_TIMEOUT; unset => DEFAULT_IDLE_TIMEOUT_MS.
+   */
+  idleTimeoutMs: number;
 }
 
 export const MIN_API_TOKEN_LENGTH = 32;
 
 /** Default bind address: loopback only. Set REMOTEDECK_LISTEN_HOST=0.0.0.0 for Docker/compose. */
 export const DEFAULT_LISTEN_HOST = '127.0.0.1';
+
+/** Default detached-session idle timeout (5 min). REMOTEDECK_IDLE_TIMEOUT overrides; 0 disables. */
+export const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
 
 const MASTER_KEY_RE = /^[0-9a-f]{64}$/i;
 
@@ -37,6 +47,25 @@ function resolveListenHost(raw: string | undefined): string {
     );
   }
   return value;
+}
+
+
+/**
+ * Resolve the detached-session idle timeout from REMOTEDECK_IDLE_TIMEOUT.
+ * Unset/empty => DEFAULT_IDLE_TIMEOUT_MS. A valid non-negative integer (in ms) is used
+ * verbatim; `0` means keep detached sessions indefinitely (no idle close). Any other
+ * value is rejected so the timeout is always deterministic (fail closed).
+ */
+function resolveIdleTimeoutMs(raw: string | undefined): number {
+  const value = (raw ?? '').trim();
+  if (value === '') return DEFAULT_IDLE_TIMEOUT_MS;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(
+      'REMOTEDECK_IDLE_TIMEOUT must be a non-negative integer number of milliseconds '
+      + '(0 disables idle close, keeping detached sessions indefinitely). Refusing to start (fail closed).'
+    );
+  }
+  return parseInt(value, 10);
 }
 
 export function resolveConfig(env: NodeJS.ProcessEnv = process.env): ResolvedConfig {
@@ -69,5 +98,6 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): ResolvedCon
     masterKey,
     apiToken,
     allowedOrigins,
+    idleTimeoutMs: resolveIdleTimeoutMs(env.REMOTEDECK_IDLE_TIMEOUT),
   };
 }
