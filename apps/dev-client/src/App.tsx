@@ -16,6 +16,7 @@ import { persistHost } from './host-save.js';
 import { layoutForWidth, type RemoteDeckLayout } from './responsive-layout.js';
 import { joinSftpPath, parentSftpPath } from './sftp-path.js';
 import { formatSize, sortEntries, fileIcon, type SortKey, type SortDir } from './sftp-list.js';
+import { DEFAULT_SPLIT, clampSplit, otherSide, planMove, resizeSplitWithKey, type PaneSide } from './dual-pane.js';
 import { createSftpUnmountCleanup } from './sftp-cleanup.js';
 import { createSshUnmountCleanup } from './ssh-cleanup.js';
 import { scheduleWorkspaceAutoStart, startWorkspaceConnections } from './deferred-auto-start.js';
@@ -27,8 +28,8 @@ import { saveTabState, loadTabState, type PersistedTabState } from './session-pe
 const DEV_DIRECT = import.meta.env.VITE_REMOTEDECK_MODE === 'direct';
 type FileEntry = { name: string; type: string; size?: number };
 type SftpTrust = { id: string; fingerprint: string };
-type ConfirmState = { kind: 'file' | 'dir'; name: string } | null;
-type PromptState = { mode: 'mkdir' } | { mode: 'rename'; from: string } | null;
+type ConfirmState = { kind: 'file' | 'dir'; name: string; side: PaneSide } | null;
+type PromptState = { mode: 'mkdir'; side: PaneSide } | { mode: 'rename'; from: string; side: PaneSide } | null;
 
 export function isArchivedHost(host: Pick<Host, 'tags'>): boolean {
   return host.tags.some((tag) => tag.toLocaleLowerCase() === 'archived');
@@ -155,6 +156,22 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
   const [prompt, setPrompt] = useState<PromptState>(null);
   const [promptValue, setPromptValue] = useState('');
   const [overwriteName, setOverwriteName] = useState<string | null>(null);
+  // Dual-pane (split window) state: the left pane reuses sftpPath/sftpFiles (side 'a');
+  // the right pane keeps its own path/list (side 'b'). Both share one SFTP session.
+  const [dual, setDual] = useState(false);
+  const [split, setSplit] = useState(DEFAULT_SPLIT);
+  const [bPath, setBPath] = useState('');
+  const [bFiles, setBFiles] = useState<FileEntry[]>([]);
+  const bPathRef = useRef('');
+  const bFilesRef = useRef<FileEntry[]>([]);
+  const duoRef = useRef<HTMLDivElement | null>(null);
+  const dragSplitRef = useRef<{ pointerId: number; startX: number; rectWidth: number; startSplit: number } | null>(null);
+  const uploadTarget = useRef<{ side: PaneSide; dir: string }>({ side: 'a', dir: '' });
+  const sortedB = useMemo(() => sortEntries(bFiles, sortKey, sortDir), [bFiles, sortKey, sortDir]);
+  const pathRefOf = (side: PaneSide) => side === 'a' ? sftpPathRef : bPathRef;
+  const filesRefOf = (side: PaneSide) => side === 'a' ? sftpFilesRef : bFilesRef;
+  useEffect(() => { bPathRef.current = bPath; }, [bPath]);
+  useEffect(() => { bFilesRef.current = bFiles; }, [bFiles]);
   const sftpIdRef = useRef('');
   const closedSftpSessionIdsRef = useRef(new Set<string>());
   const sftpPathRef = useRef('');
@@ -174,13 +191,15 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
   }, [sshState, onStatus, tab.id]);
   useEffect(() => createSshUnmountCleanup(client, () => sessionIdRef.current, () => closeSocketRef(wsRef), closedSshSessionIdsRef.current), [client]);
   useEffect(() => createSftpUnmountCleanup(client, () => sftpIdRef.current, closedSftpSessionIdsRef.current), [client]);
-  const loadFiles = useCallback(async (id: string, path: string) => { const result = await client.sftpList(id, path); if (!mountedRef.current) return; setSftpFiles(result.files); setSftpPath(result.path); setSftpStatus(result.path || '/'); }, [client]);
+  const loadSide = useCallback(async (side: PaneSide, id: string, path: string) => { const result = await client.sftpList(id, path); if (!mountedRef.current) return; if (side === 'a') { setSftpFiles(result.files); setSftpPath(result.path); setSftpStatus(result.path || '/'); } else { setBFiles(result.files); setBPath(result.path); } }, [client]);
+  const loadFiles = useCallback((id: string, path: string) => loadSide('a', id, path), [loadSide]);
   const uploadFlow = useMemo(() => createUploadFlow(async (file, overwrite) => {
     const id = sftpIdRef.current; if (!id) return;
+    const { side, dir } = uploadTarget.current;
     setSftpBusy(true); setSftpError(''); setSftpStatus(`업로드 중 · ${file.name}`);
-    try { await client.sftpUpload(id, joinSftpPath(sftpPathRef.current, file.name), file, overwrite); await loadFiles(id, sftpPathRef.current); }
+    try { await client.sftpUpload(id, joinSftpPath(dir, file.name), file, overwrite); await loadSide(side, id, dir); }
     catch (error) { setSftpError((error as Error).message); } finally { setSftpBusy(false); }
-  }), [client, loadFiles]);
+  }), [client, loadSide]);
 
   useEffect(() => {
     if (!termEl.current) return;
@@ -236,11 +255,50 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
   const toggleSftpCollapsed = () => setCollapsedPanes((current) => togglePaneCollapse(current, 'sftp'));
   const approveSftpTrust = async () => { if (!sftpTrust) return; setSftpBusy(true); setSftpError(''); try { await client.trustSftpSession(sftpTrust.id); sftpIdRef.current = sftpTrust.id; if (!mountedRef.current) { closeRemoteSessionOnce(sftpTrust.id, closedSftpSessionIdsRef.current, (id) => client.closeSftpSession(id)); return; } setSftpId(sftpTrust.id); setSftpTrust(null); await loadFiles(sftpTrust.id, ''); } catch (error) { if (mountedRef.current) setSftpError((error as Error).message); } finally { if (mountedRef.current) setSftpBusy(false); } };
   const runSftp = async (action: () => Promise<void>) => { setSftpBusy(true); setSftpError(''); try { await action(); } catch (error) { setSftpError((error as Error).message); } finally { setSftpBusy(false); } };
-  const navigate = (path: string) => { if (sftpId) void runSftp(() => loadFiles(sftpId, path)); };
-  const runPrompt = async () => { if (!prompt || !sftpId || !promptValue.trim()) return; const value = promptValue.trim(); await runSftp(async () => { if (prompt.mode === 'mkdir') await client.sftpMkdir(sftpId, joinSftpPath(sftpPath, value)); else await client.sftpRename(sftpId, joinSftpPath(sftpPath, prompt.from), joinSftpPath(sftpPath, value)); await loadFiles(sftpId, sftpPath); }); setPrompt(null); };
-  const confirmDelete = async () => { if (!confirm || !sftpId) return; await runSftp(async () => { const path = joinSftpPath(sftpPath, confirm.name); if (confirm.kind === 'dir') await client.sftpDeleteDir(sftpId, path); else await client.sftpDeleteFile(sftpId, path); await loadFiles(sftpId, sftpPath); }); setConfirm(null); };
-  const selectUpload = async (event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; event.target.value = ''; if (!file || !sftpId) return; const result = await uploadFlow.select(sftpFilesRef.current.map((entry) => entry.name), file); if (result.overwrite) setOverwriteName(file.name); };
-  const download = async (name: string) => { if (!sftpId) return; await runSftp(async () => { const blob = await client.sftpDownload(sftpId, joinSftpPath(sftpPath, name)); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 5000); }); };
+  const navigate = (side: PaneSide, path: string) => { if (sftpId) void runSftp(() => loadSide(side, sftpId, path)); };
+  const runPrompt = async () => { if (!prompt || !sftpId || !promptValue.trim()) return; const value = promptValue.trim(); const side = prompt.side; const dir = pathRefOf(side).current; await runSftp(async () => { if (prompt.mode === 'mkdir') await client.sftpMkdir(sftpId, joinSftpPath(dir, value)); else await client.sftpRename(sftpId, joinSftpPath(dir, prompt.from), joinSftpPath(dir, value)); await loadSide(side, sftpId, dir); }); setPrompt(null); };
+  const confirmDelete = async () => { if (!confirm || !sftpId) return; const side = confirm.side; const dir = pathRefOf(side).current; await runSftp(async () => { const path = joinSftpPath(dir, confirm.name); if (confirm.kind === 'dir') await client.sftpDeleteDir(sftpId, path); else await client.sftpDeleteFile(sftpId, path); await loadSide(side, sftpId, dir); }); setConfirm(null); };
+  const selectUpload = async (event: ChangeEvent<HTMLInputElement>, side: PaneSide) => { const file = event.target.files?.[0]; event.target.value = ''; if (!file || !sftpId) return; const dir = pathRefOf(side).current; uploadTarget.current = { side, dir }; const result = await uploadFlow.select(filesRefOf(side).current.map((entry) => entry.name), file); if (result.overwrite) setOverwriteName(file.name); };
+  const download = async (name: string, side: PaneSide) => { if (!sftpId) return; const dir = pathRefOf(side).current; await runSftp(async () => { const blob = await client.sftpDownload(sftpId, joinSftpPath(dir, name)); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 5000); }); };
+  const toggleDual = () => {
+    const next = !dual;
+    setDual(next);
+    if (next && sftpId && bFilesRef.current.length === 0) void runSftp(() => loadSide('b', sftpId, sftpPathRef.current));
+  };
+  const moveEntry = async (side: PaneSide, entry: FileEntry) => {
+    if (!sftpId) return;
+    const dest = otherSide(side);
+    const plan = planMove(pathRefOf(side).current, pathRefOf(dest).current, { name: entry.name, type: entry.type }, filesRefOf(dest).current.map((e) => e.name));
+    if (!plan.ok) { setSftpError(plan.reason === 'same-dir' ? '두 창의 경로가 같아 이동할 수 없습니다.' : '디렉터리를 자기 자신 하위로 이동할 수 없습니다.'); return; }
+    await runSftp(async () => {
+      await client.sftpRename(sftpId, plan.from, plan.to);
+      await Promise.all([loadSide(side, sftpId, pathRefOf(side).current), loadSide(dest, sftpId, pathRefOf(dest).current)]);
+    });
+  };
+  const startSplitDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const rect = duoRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0) return;
+    dragSplitRef.current = { pointerId: event.pointerId, startX: event.clientX, rectWidth: rect.width, startSplit: split };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const moveSplitDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragSplitRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setSplit(clampSplit(drag.startSplit + (event.clientX - drag.startX) / drag.rectWidth));
+  };
+  const endSplitDrag = (event: React.PointerEvent<HTMLDivElement>) => { if (dragSplitRef.current?.pointerId === event.pointerId) dragSplitRef.current = null; };
+  const splitKey = (event: React.KeyboardEvent<HTMLDivElement>) => { const next = resizeSplitWithKey(split, event.key); if (next !== split) { event.preventDefault(); setSplit(next); } };
+  const renderBrowser = (side: PaneSide) => {
+    const path = side === 'a' ? sftpPath : bPath;
+    const files = side === 'a' ? sftpFiles : bFiles;
+    const sorted = side === 'a' ? sortedFiles : sortedB;
+    const goto = (p: string) => navigate(side, p);
+    return <>
+      <div className="rd-file-tools"><button className="compact" disabled={!path || sftpBusy} onClick={() => goto(parentSftpPath(path))} aria-label="상위 폴더">↑</button><span className="path" title={path || '/'}>{path || '/'}</span><button className="compact" disabled={sftpBusy} onClick={() => goto(path)} aria-label="파일 새로고침">↻</button><button className="compact" disabled={sftpBusy} onClick={() => { setPromptValue(''); setPrompt({ mode: 'mkdir', side }); }}>새 폴더</button><label className="rd-upload compact">업로드<input type="file" aria-label="업할 파일 선택" disabled={sftpBusy} onChange={(event) => void selectUpload(event, side)} /></label></div>
+      <div className="rd-file-head" role="row"><button className={`rd-file-th ${sortKey === 'name' ? 'active' : ''}`} role="columnheader" aria-sort={sortKey === 'name' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onClick={() => toggleSort('name')}>이름 {sortKey === 'name' ? (sortDir === 'asc' ? '▲' : '▼') : ''}</button><button className={`rd-file-th ${sortKey === 'size' ? 'active' : ''}`} role="columnheader" aria-sort={sortKey === 'size' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onClick={() => toggleSort('size')}>크기 {sortKey === 'size' ? (sortDir === 'asc' ? '▲' : '▼') : ''}</button><span className="rd-file-th" /></div>
+      <ul className="rd-filelist">{sorted.map((entry) => <li className="rd-file-row" key={`${side}/${entry.name}`}><button className="rd-file-name" disabled={sftpBusy} onClick={() => entry.type === 'directory' && goto(joinSftpPath(path, entry.name))}><span aria-hidden="true">{fileIcon(entry.type)}</span>{entry.name}</button><span className="meta">{entry.type === 'directory' ? '폴더' : formatSize(entry.size)}</span><div className="rd-row-actions">{entry.type === 'file' && <button className="icon" aria-label={`${entry.name} 다운로드`} onClick={() => void download(entry.name, side)}>↓</button>}{dual && <button className="icon" aria-label={`${entry.name}를 다른 창으로 이동`} onClick={() => void moveEntry(side, entry)}>→</button>}<button className="icon" aria-label={`${entry.name} 이름 변경`} onClick={() => { setPromptValue(entry.name); setPrompt({ mode: 'rename', from: entry.name, side }); }}>✎</button><button className="icon danger" aria-label={`${entry.name} 삭제`} onClick={() => { setConfirm({ kind: entry.type === 'directory' ? 'dir' : 'file', name: entry.name, side }); }}>×</button></div></li>)}{files.length === 0 && <li className="rd-empty-state">빈 폴더입니다.</li>}</ul>
+    </>;
+  };
   const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => { dragRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: sftpHeight }; event.currentTarget.setPointerCapture(event.pointerId); };
   const drag = (event: ReactPointerEvent<HTMLDivElement>) => { const current = dragRef.current; if (current?.pointerId === event.pointerId) setSftpHeight(clampSftpHeight(current.startHeight + current.startY - event.clientY)); };
   const stopDrag = (event: ReactPointerEvent<HTMLDivElement>) => { if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null; };
@@ -262,17 +320,11 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
     <div className="rd-split" data-mobile-view={mobileView} data-ssh-collapsed={sshCollapsed} data-sftp-collapsed={sftpCollapsed}>
       <div id={terminalPanelId} role="tabpanel" className="rd-terminal-pane" aria-label={`${host.name} 터미널`} data-collapsed={sshCollapsed}><div className="rd-terminal-title"><span>SSH 터미널</span><span className="rd-pane-title-actions"><span>{sessionId ? `세션 ${sessionId.slice(0, 8)}` : '대기'}</span><button className="rd-pane-collapse" aria-label={`SSH ${sshCollapsed ? '펼치기' : '접기'}`} aria-expanded={!sshCollapsed} onClick={toggleSshCollapsed}>{sshCollapsed ? '펼치기' : '접기'}</button></span></div><div className="rd-terminal-wrap" ref={termEl} /></div>
       {!sftpCollapsed && !sshCollapsed && <div className="rd-divider" role="separator" aria-label="SSH와 SFTP 패널 높이" aria-orientation="horizontal" aria-valuemin={MIN_SFTP_HEIGHT} aria-valuemax={MAX_SFTP_HEIGHT} aria-valuenow={sftpHeight} tabIndex={0} onPointerDown={startDrag} onPointerMove={drag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onKeyDown={resizeWithKeyboard} />}
-      <aside id={filesPanelId} role="tabpanel" className="rd-sftp-pane" aria-label={`${host.name} SFTP 파일`} data-collapsed={sftpCollapsed} style={!sftpCollapsed && !sshCollapsed ? { height: sftpHeight } : undefined}><div className="rd-pane-title"><span>SFTP</span><span className="rd-pane-title-actions"><span className={sftpError ? 'error' : ''}>{sftpBusy ? '작업 중…' : sftpStatus}</span><button className="rd-pane-collapse" aria-label={`SFTP ${sftpCollapsed ? '펼치기' : '접기'}`} aria-expanded={!sftpCollapsed} onClick={toggleSftpCollapsed}>{sftpCollapsed ? '펼치기' : '접기'}</button></span></div><div className="rd-sftp-body">
+      <aside id={filesPanelId} role="tabpanel" className="rd-sftp-pane" aria-label={`${host.name} SFTP 파일`} data-collapsed={sftpCollapsed} style={!sftpCollapsed && !sshCollapsed ? { height: sftpHeight } : undefined}><div className="rd-pane-title"><span>SFTP</span><span className="rd-pane-title-actions"><span className={sftpError ? 'error' : ''}>{sftpBusy ? '작업 중…' : sftpStatus}</span><button className="rd-pane-collapse" aria-pressed={dual} aria-label="SFTP 창 분할" title="두 개의 파일 창을 나란히 표시" onClick={toggleDual}>분할</button><button className="rd-pane-collapse" aria-label={`SFTP ${sftpCollapsed ? '펼치기' : '접기'}`} aria-expanded={!sftpCollapsed} onClick={toggleSftpCollapsed}>{sftpCollapsed ? '펼치기' : '접기'}</button></span></div><div className="rd-sftp-body">
         {sftpTrust && <div className="rd-trust compact-trust" role="alert"><span>SFTP 키 확인</span><code>{sftpTrust.fingerprint}</code><button className="primary compact" onClick={() => void approveSftpTrust()}>신뢰</button></div>}
         {sftpError && <div className="rd-sftp-unavailable" role="status">파일 패널만 사용할 수 없습니다.<br />{sftpError}<button className="compact" onClick={() => void connectSftp()}>다시 시도</button></div>}
         {!sftpId && !sftpTrust && !sftpError && <div className="rd-empty-state">연결하면 이 서버의 파일을 함께 볼 수 있습니다.</div>}
-        {sftpId && <><div className="rd-file-tools"><button className="compact" disabled={!sftpPath || sftpBusy} onClick={() => navigate(parentSftpPath(sftpPath))} aria-label="상위 폴더">↑</button><span className="path" title={sftpPath || '/'}>{sftpPath || '/'}</span><button className="compact" disabled={sftpBusy} onClick={() => navigate(sftpPath)} aria-label="파일 새로고침">↻</button><button className="compact" disabled={sftpBusy} onClick={() => { setPromptValue(''); setPrompt({ mode: 'mkdir' }); }}>새 폴더</button><label className="rd-upload compact">업로드<input type="file" aria-label="업할 파일 선택" disabled={sftpBusy} onChange={(event) => void selectUpload(event)} /></label></div>
-          <div className="rd-file-head" role="row">
-            <button className={`rd-file-th ${sortKey === 'name' ? 'active' : ''}`} role="columnheader" aria-sort={sortKey === 'name' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onClick={() => toggleSort('name')}>이름 {sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}</button>
-            <button className={`rd-file-th ${sortKey === 'size' ? 'active' : ''}`} role="columnheader" aria-sort={sortKey === 'size' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onClick={() => toggleSort('size')}>크기 {sortKey === 'size' ? (sortDir === 'asc' ? '↑' : '↓') : ''}</button>
-            <span className="rd-file-th" />
-          </div>
-          <ul className="rd-filelist">{sortedFiles.map((entry) => <li className="rd-file-row" key={entry.name}><button className="rd-file-name" disabled={sftpBusy} onClick={() => entry.type === 'directory' && navigate(joinSftpPath(sftpPath, entry.name))}><span aria-hidden="true">{fileIcon(entry.type)}</span>{entry.name}</button><span className="meta">{entry.type === 'directory' ? '폴더' : formatSize(entry.size)}</span><div className="rd-row-actions">{entry.type === 'file' && <button className="icon" aria-label={`${entry.name} 다운로드`} onClick={() => void download(entry.name)}>↓</button>}<button className="icon" aria-label={`${entry.name} 이름 변경`} onClick={() => { setPromptValue(entry.name); setPrompt({ mode: 'rename', from: entry.name }); }}>✎</button><button className="icon danger" aria-label={`${entry.name} 삭제`} onClick={() => setConfirm({ kind: entry.type === 'directory' ? 'dir' : 'file', name: entry.name })}>×</button></div></li>)}{sftpFiles.length === 0 && <li className="rd-empty-state">빈 폴더입니다.</li>}</ul></>}
+        {sftpId && (dual ? <div className="rd-sftp-duo" ref={duoRef}><div className="rd-sftp-col" style={{ flexGrow: split, flexBasis: 0 }}>{renderBrowser('a')}</div><div className="rd-sftp-vdivider" role="separator" aria-orientation="vertical" aria-label="두 파일 창 너비 조절" aria-valuemin={25} aria-valuemax={75} aria-valuenow={Math.round(split * 100)} tabIndex={0} onPointerDown={startSplitDrag} onPointerMove={moveSplitDrag} onPointerUp={endSplitDrag} onPointerCancel={endSplitDrag} onKeyDown={splitKey} /><div className="rd-sftp-col" style={{ flexGrow: 1 - split, flexBasis: 0 }}>{renderBrowser('b')}</div></div> : <div className="rd-sftp-col">{renderBrowser('a')}</div>)}
       </div></aside>
     </div>
     {prompt && <Dialog small label={prompt.mode === 'mkdir' ? '새 폴더 이름' : '이름 변경'} onCancel={() => setPrompt(null)}><label>{prompt.mode === 'mkdir' ? '새 폴더 이름' : '새 이름'}<input value={promptValue} onChange={(event) => setPromptValue(event.target.value)} /></label><div className="rd-modal-actions"><button onClick={() => setPrompt(null)}>취소</button><button className="primary" disabled={!promptValue.trim()} onClick={() => void runPrompt()}>확인</button></div></Dialog>}

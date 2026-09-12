@@ -29,6 +29,6 @@ describe('SFTP relative path contract', () => {
     const source = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
     expect(source).not.toContain('function joinPath');
     expect(source.match(/joinSftpPath\(/g)?.length).toBeGreaterThanOrEqual(7);
-    expect(source).toContain('parentSftpPath(sftpPath)');
+    expect(source).toContain('parentSftpPath(path)');
   });
 });

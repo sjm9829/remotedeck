@@ -105,6 +105,12 @@ textarea { min-height: 112px; padding-block: 8px; resize: vertical; font-family:
 .rd-split { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .rd-sftp-pane { flex: 0 0 auto; width: 100%; min-width: 0; min-height: 160px; max-height: 440px; display: flex; flex-direction: column; background: var(--rd-panel); }
 .rd-sftp-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.rd-sftp-duo { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: row; }
+.rd-sftp-col { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.rd-sftp-body > .rd-sftp-col { flex: 1 1 auto; }
+.rd-sftp-vdivider { flex: 0 0 6px; width: 6px; cursor: col-resize; background: #0c1118; border-inline: 1px solid var(--rd-border); touch-action: none; }
+.rd-sftp-vdivider:hover, .rd-sftp-vdivider:focus-visible { background: var(--rd-accent); }
+@container remote-deck (max-width: 599px) { .rd-sftp-vdivider { display: none; } .rd-sftp-duo { flex-direction: column; } }
 .rd-divider { flex: 0 0 6px; width: 100%; height: 6px; border-block: 1px solid var(--rd-border); background: #0c1118; cursor: row-resize; touch-action: none; }
 .rd-divider:hover, .rd-divider:focus-visible { background: var(--rd-accent); }
 .rd-terminal-pane { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #10151d; }
