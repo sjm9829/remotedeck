@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_SPLIT, MAX_SPLIT, MIN_SPLIT, clampSplit, isDescendant, otherSide,
-  planMove, resizeSplitWithKey, uniqueName,
+  planBulkMove, planMove, resizeSplitWithKey, uniqueName,
 } from '../dual-pane.js';
 
 describe('pane identity', () => {
@@ -89,5 +89,25 @@ describe('planMove', () => {
   it('moves into the root from a subdir', () => {
     expect(planMove('a/b', '', { name: 'f', type: 'file' }, []))
       .toEqual({ ok: true, from: 'a/b/f', to: 'f' });
+  });
+});
+
+describe('planBulkMove', () => {
+  it('plans independent moves and de-conflicts against the destination', () => {
+    const r = planBulkMove('L', 'R', [{ name: 'a.txt', type: 'file' }, { name: 'b.txt', type: 'file' }], ['b.txt']);
+    expect(r.moves).toEqual([
+      { from: 'L/a.txt', to: 'R/a.txt' },
+      { from: 'L/b.txt', to: 'R/b (1).txt' },
+    ]);
+    expect(r.skipped).toEqual([]);
+  });
+  it('skips same-dir moves without emitting an operation', () => {
+    const r = planBulkMove('same', 'same', [{ name: 'x', type: 'file' }], []);
+    expect(r.moves).toEqual([]);
+    expect(r.skipped).toEqual([{ name: 'x', reason: 'same-dir' }]);
+  });
+  it('skips a directory moved into its own subtree', () => {
+    const r = planBulkMove('', 'proj/build', [{ name: 'proj', type: 'directory' }], []);
+    expect(r.skipped).toEqual([{ name: 'proj', reason: 'into-subtree' }]);
   });
 });

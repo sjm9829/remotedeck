@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type DragEvent as ReactDragEvent, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { RemoteDeckClient } from '@remotedeck/client-sdk';
@@ -16,8 +16,12 @@ import { persistHost } from './host-save.js';
 import { layoutForWidth, type RemoteDeckLayout } from './responsive-layout.js';
 import { joinSftpPath, parentSftpPath } from './sftp-path.js';
 import { formatSize, sortEntries, fileIcon, type SortKey, type SortDir } from './sftp-list.js';
-import { DEFAULT_SPLIT, clampSplit, otherSide, planMove, resizeSplitWithKey, type PaneSide } from './dual-pane.js';
+import { DEFAULT_SPLIT, clampSplit, otherSide, planBulkMove, planMove, resizeSplitWithKey, type PaneSide } from './dual-pane.js';
 import { createSftpUnmountCleanup } from './sftp-cleanup.js';
+import { breadcrumbs } from './sftp-breadcrumb.js';
+import { contextMenuItems, type ContextActionId } from './sftp-context-menu.js';
+import { createBatchUploadFlow } from './sftp-batch-upload.js';
+import { clearSelection, emptySelection, moveCursor, pruneSelection, selectAll, selectEntry, selectedInOrder, type Selection } from './sftp-selection.js';
 import { createSshUnmountCleanup } from './ssh-cleanup.js';
 import { scheduleWorkspaceAutoStart, startWorkspaceConnections } from './deferred-auto-start.js';
 import { EXPANDED_PANES, togglePaneCollapse } from './pane-collapse.js';
@@ -30,6 +34,8 @@ type FileEntry = { name: string; type: string; size?: number };
 type SftpTrust = { id: string; fingerprint: string };
 type ConfirmState = { kind: 'file' | 'dir'; name: string; side: PaneSide } | null;
 type PromptState = { mode: 'mkdir'; side: PaneSide } | { mode: 'rename'; from: string; side: PaneSide } | null;
+type ContextMenuState = { side: PaneSide; name: string; x: number; y: number } | null;
+type BulkDeleteState = { side: PaneSide; items: { name: string; kind: 'file' | 'dir' }[] } | null;
 
 export function isArchivedHost(host: Pick<Host, 'tags'>): boolean {
   return host.tags.some((tag) => tag.toLocaleLowerCase() === 'archived');
@@ -172,6 +178,20 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
   const filesRefOf = (side: PaneSide) => side === 'a' ? sftpFilesRef : bFilesRef;
   useEffect(() => { bPathRef.current = bPath; }, [bPath]);
   useEffect(() => { bFilesRef.current = bFiles; }, [bFiles]);
+  // Multi-selection + power-user browse state (per pane). Selection is a set of
+  // entry names per side; it drives bulk delete/download/move and the context menu.
+  const [selA, setSelA] = useState<Selection>(emptySelection);
+  const [selB, setSelB] = useState<Selection>(emptySelection);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+  const [bulkDelete, setBulkDelete] = useState<BulkDeleteState>(null);
+  const [batchConflicts, setBatchConflicts] = useState<string[] | null>(null);
+  const selOf = (side: PaneSide): Selection => side === 'a' ? selA : selB;
+  const setSelOf = (side: PaneSide) => (side === 'a' ? setSelA : setSelB);
+  const namesOf = (side: PaneSide) => (side === 'a' ? sortedFiles : sortedB).map((entry) => entry.name);
+  const entryOf = (side: PaneSide, name: string) => (side === 'a' ? sortedFiles : sortedB).find((entry) => entry.name === name);
+  // Keep selections valid across refreshes/navigation: drop entries that vanished.
+  useEffect(() => { setSelA((current) => pruneSelection(current, sftpFiles.map((entry) => entry.name))); }, [sftpFiles]);
+  useEffect(() => { setSelB((current) => pruneSelection(current, bFiles.map((entry) => entry.name))); }, [bFiles]);
   const sftpIdRef = useRef('');
   const closedSftpSessionIdsRef = useRef(new Set<string>());
   const sftpPathRef = useRef('');
@@ -200,6 +220,16 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
     try { await client.sftpUpload(id, joinSftpPath(dir, file.name), file, overwrite); await loadSide(side, id, dir); }
     catch (error) { setSftpError((error as Error).message); } finally { setSftpBusy(false); }
   }), [client, loadSide]);
+  const batchUpload = useMemo(() => createBatchUploadFlow<File>(
+    (file) => file.name,
+    async (file, overwrite) => {
+      const id = sftpIdRef.current; if (!id) return;
+      const { side, dir } = uploadTarget.current;
+      setSftpBusy(true); setSftpError(''); setSftpStatus(`업로드 중 뜰 ${file.name}`);
+      try { await client.sftpUpload(id, joinSftpPath(dir, file.name), file, overwrite); await loadSide(side, id, dir); }
+      catch (error) { setSftpError((error as Error).message); } finally { setSftpBusy(false); }
+    },
+  ), [client, loadSide]);
 
   useEffect(() => {
     if (!termEl.current) return;
@@ -275,6 +305,86 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
       await Promise.all([loadSide(side, sftpId, pathRefOf(side).current), loadSide(dest, sftpId, pathRefOf(dest).current)]);
     });
   };
+  // --- SFTP power-user browsing: selection, bulk operations, context menu, drag-drop ---
+  const selectRow = (event: ReactMouseEvent, side: PaneSide, name: string) => {
+    setContextMenu(null);
+    setSelOf(side)(selectEntry(namesOf(side), name, { additive: event.ctrlKey || event.metaKey, range: event.shiftKey }, selOf(side)));
+  };
+  const openEntry = (side: PaneSide, entry: FileEntry) => { if (entry.type === 'directory') navigate(side, joinSftpPath(pathRefOf(side).current, entry.name)); else void download(entry.name, side); };
+  const openContextMenu = (event: ReactMouseEvent, side: PaneSide, entry: FileEntry) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const sel = selOf(side);
+    if (!sel.selected.has(entry.name)) setSelOf(side)(selectEntry(namesOf(side), entry.name, {}, sel));
+    setContextMenu({ side, name: entry.name, x: event.clientX, y: event.clientY });
+  };
+  const runContextAction = (action: ContextActionId) => {
+    const menu = contextMenu; if (!menu) return;
+    const { side, name } = menu;
+    const sel = selOf(side);
+    const target = entryOf(side, name);
+    setContextMenu(null);
+    if (action === 'open') { if (target) void openEntry(side, target); }
+    else if (action === 'download') { for (const n of selectedInOrder(sel, namesOf(side))) { const e = entryOf(side, n); if (e && e.type === 'file') void download(n, side); } }
+    else if (action === 'rename') { if (target) { setPromptValue(name); setPrompt({ mode: 'rename', from: name, side }); } }
+    else if (action === 'move') { for (const n of selectedInOrder(sel, namesOf(side))) { const e = entryOf(side, n); if (e) void moveEntry(side, e); } }
+    else if (action === 'delete') {
+      const names = sel.selected.has(name) ? selectedInOrder(sel, namesOf(side)) : [name];
+      const items = names.map((n) => { const e = entryOf(side, n); return { name: n, kind: (e && e.type === 'directory' ? 'dir' : 'file') as 'file' | 'dir' }; });
+      setBulkDelete({ side, items });
+    }
+  };
+  const downloadSelection = (side: PaneSide) => { const sel = selOf(side); for (const n of selectedInOrder(sel, namesOf(side))) { const e = entryOf(side, n); if (e && e.type === 'file') void download(n, side); } };
+  const deleteSelection = (side: PaneSide) => { const sel = selOf(side); const items = selectedInOrder(sel, namesOf(side)).map((n) => { const e = entryOf(side, n); return { name: n, kind: (e && e.type === 'directory' ? 'dir' : 'file') as 'file' | 'dir' }; }); if (items.length) setBulkDelete({ side, items }); };
+  const confirmBulkDelete = async () => {
+    if (!bulkDelete || !sftpId) return; const { side, items } = bulkDelete; const dir = pathRefOf(side).current;
+    await runSftp(async () => {
+      for (const item of items) { const path = joinSftpPath(dir, item.name); if (item.kind === 'dir') await client.sftpDeleteDir(sftpId, path); else await client.sftpDeleteFile(sftpId, path); }
+      await loadSide(side, sftpId, dir);
+    });
+    setSelOf(side)(clearSelection());
+    setBulkDelete(null);
+  };
+  const moveSelection = async (side: PaneSide) => {
+    if (!sftpId) return;
+    const sel = selOf(side);
+    const entries = (side === 'a' ? sftpFiles : bFiles).filter((entry) => sel.selected.has(entry.name)).map((entry) => ({ name: entry.name, type: entry.type }));
+    if (!entries.length) return;
+    const dest = otherSide(side);
+    const plan = planBulkMove(pathRefOf(side).current, pathRefOf(dest).current, entries, filesRefOf(dest).current.map((entry) => entry.name));
+    if (plan.skipped.length) setSftpError(plan.skipped[0].reason === 'same-dir' ? '두 창의 경로가 같아 이동할 수 없습니다.' : '디렉터리를 자기 자신 하위로 이동할 수 없습니다.');
+    await runSftp(async () => {
+      for (const step of plan.moves) await client.sftpRename(sftpId, step.from, step.to);
+      await Promise.all([loadSide(side, sftpId, pathRefOf(side).current), loadSide(dest, sftpId, pathRefOf(dest).current)]);
+    });
+    setSelOf(side)(clearSelection());
+  };
+  const dropUpload = (event: ReactDragEvent, side: PaneSide) => {
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer.files);
+    if (!files.length || !sftpId) return;
+    const dir = pathRefOf(side).current;
+    uploadTarget.current = { side, dir };
+    const { conflicts } = batchUpload.add(filesRefOf(side).current.map((entry) => entry.name), files);
+    if (conflicts.length) setBatchConflicts(conflicts);
+  };
+  const rowKeyDown = (event: KeyboardEvent<HTMLLIElement>, side: PaneSide, entry: FileEntry) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setSelOf(side)(moveCursor(namesOf(side), selOf(side), event.key === 'ArrowDown' ? 1 : -1)); }
+    else if (event.key === 'Enter') { event.preventDefault(); openEntry(side, entry); }
+    else if (event.key === 'a' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); setSelOf(side)(selectAll(namesOf(side))); }
+    else if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelection(side); }
+    else if (event.key === 'Escape') { setSelOf(side)(clearSelection()); }
+  };
+  const closeContextMenu = () => setContextMenu(null);
+  useEffect(() => {
+    if (!contextMenu) return;
+    const onDoc = () => setContextMenu(null);
+    const onKey = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') setContextMenu(null); };
+    document.addEventListener('click', onDoc);
+    document.addEventListener('contextmenu', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('click', onDoc); document.removeEventListener('contextmenu', onDoc); document.removeEventListener('keydown', onKey); };
+  }, [contextMenu]);
   const startSplitDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     const rect = duoRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0) return;
@@ -292,11 +402,15 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
     const path = side === 'a' ? sftpPath : bPath;
     const files = side === 'a' ? sftpFiles : bFiles;
     const sorted = side === 'a' ? sortedFiles : sortedB;
+    const sel = selOf(side);
+    const selCount = sel.selected.size;
+    const crumbs = breadcrumbs(path);
     const goto = (p: string) => navigate(side, p);
     return <>
-      <div className="rd-file-tools"><button className="compact" disabled={!path || sftpBusy} onClick={() => goto(parentSftpPath(path))} aria-label="상위 폴더">↑</button><span className="path" title={path || '/'}>{path || '/'}</span><button className="compact" disabled={sftpBusy} onClick={() => goto(path)} aria-label="파일 새로고침">↻</button><button className="compact" disabled={sftpBusy} onClick={() => { setPromptValue(''); setPrompt({ mode: 'mkdir', side }); }}>새 폴더</button><label className="rd-upload compact">업로드<input type="file" aria-label="업할 파일 선택" disabled={sftpBusy} onChange={(event) => void selectUpload(event, side)} /></label></div>
+      <div className="rd-file-tools"><nav className="rd-breadcrumb" aria-label="경로">{crumbs.map((crumb, index) => index === crumbs.length - 1 ? <span className="crumb current" key={`${side}-c${index}`} aria-current="page">{crumb.label}</span> : <button className="crumb" key={`${side}-c${index}`} disabled={sftpBusy} onClick={() => goto(crumb.path)}>{crumb.label}</button>)}<button className="crumb sep" disabled={!path || sftpBusy} onClick={() => goto(parentSftpPath(path))} aria-label="상위 폴더">↑</button></nav><button className="compact" disabled={sftpBusy} onClick={() => goto(path)} aria-label="파일 새로고침">↻</button>{files.length > 0 && <button className="compact" disabled={sftpBusy} onClick={() => setSelOf(side)(selectAll(sorted.map((entry) => entry.name)))}>전체</button>}<button className="compact" disabled={sftpBusy} onClick={() => { setPromptValue(''); setPrompt({ mode: 'mkdir', side }); }}>새 폴더</button><label className="rd-upload compact">업로드<input type="file" aria-label="업로드할 파일 선택" disabled={sftpBusy} onChange={(event) => void selectUpload(event, side)} /></label></div>
+      {selCount > 0 && <div className="rd-file-bulk"><span>{selCount}개 선택</span><button className="compact" disabled={sftpBusy} onClick={() => downloadSelection(side)}>다운로드</button>{dual && <button className="compact" disabled={sftpBusy} onClick={() => void moveSelection(side)}>다른 창으로</button>}<button className="compact danger" disabled={sftpBusy} onClick={() => deleteSelection(side)}>삭제</button><button className="compact" onClick={() => setSelOf(side)(clearSelection())}>해제</button></div>}
       <div className="rd-file-head" role="row"><button className={`rd-file-th ${sortKey === 'name' ? 'active' : ''}`} role="columnheader" aria-sort={sortKey === 'name' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onClick={() => toggleSort('name')}>이름 {sortKey === 'name' ? (sortDir === 'asc' ? '▲' : '▼') : ''}</button><button className={`rd-file-th ${sortKey === 'size' ? 'active' : ''}`} role="columnheader" aria-sort={sortKey === 'size' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onClick={() => toggleSort('size')}>크기 {sortKey === 'size' ? (sortDir === 'asc' ? '▲' : '▼') : ''}</button><span className="rd-file-th" /></div>
-      <ul className="rd-filelist">{sorted.map((entry) => <li className="rd-file-row" key={`${side}/${entry.name}`}><button className="rd-file-name" disabled={sftpBusy} onClick={() => entry.type === 'directory' && goto(joinSftpPath(path, entry.name))}><span aria-hidden="true">{fileIcon(entry.type)}</span>{entry.name}</button><span className="meta">{entry.type === 'directory' ? '폴더' : formatSize(entry.size)}</span><div className="rd-row-actions">{entry.type === 'file' && <button className="icon" aria-label={`${entry.name} 다운로드`} onClick={() => void download(entry.name, side)}>↓</button>}{dual && <button className="icon" aria-label={`${entry.name}를 다른 창으로 이동`} onClick={() => void moveEntry(side, entry)}>→</button>}<button className="icon" aria-label={`${entry.name} 이름 변경`} onClick={() => { setPromptValue(entry.name); setPrompt({ mode: 'rename', from: entry.name, side }); }}>✎</button><button className="icon danger" aria-label={`${entry.name} 삭제`} onClick={() => { setConfirm({ kind: entry.type === 'directory' ? 'dir' : 'file', name: entry.name, side }); }}>×</button></div></li>)}{files.length === 0 && <li className="rd-empty-state">빈 폴더입니다.</li>}</ul>
+      <ul className="rd-filelist" role="listbox" aria-multiselectable="true" onDragOver={(event) => event.preventDefault()} onDrop={(event) => dropUpload(event, side)}>{sorted.map((entry) => { const selected = sel.selected.has(entry.name); return <li className="rd-file-row" key={`${side}/${entry.name}`} role="option" aria-selected={selected} tabIndex={0} onClick={(event) => selectRow(event, side, entry.name)} onDoubleClick={() => openEntry(side, entry)} onContextMenu={(event) => openContextMenu(event, side, entry)} onKeyDown={(event) => rowKeyDown(event, side, entry)}><span className="rd-file-name"><span aria-hidden="true">{fileIcon(entry.type)}</span>{entry.name}</span><span className="meta">{entry.type === 'directory' ? '폴더' : formatSize(entry.size)}</span><div className="rd-row-actions">{entry.type === 'file' && <button className="icon" aria-label={`${entry.name} 다운로드`} onClick={(event) => { event.stopPropagation(); void download(entry.name, side); }}>↓</button>}{dual && <button className="icon" aria-label={`${entry.name}를 다른 창으로 이동`} onClick={(event) => { event.stopPropagation(); void moveEntry(side, entry); }}>→</button>}<button className="icon" aria-label={`${entry.name} 이름 변경`} onClick={(event) => { event.stopPropagation(); setPromptValue(entry.name); setPrompt({ mode: 'rename', from: entry.name, side }); }}>✎</button><button className="icon danger" aria-label={`${entry.name} 삭제`} onClick={(event) => { event.stopPropagation(); setConfirm({ kind: entry.type === 'directory' ? 'dir' : 'file', name: entry.name, side }); }}>×</button></div></li>; })}{files.length === 0 && <li className="rd-empty-state">빈 폴더입니다.</li>}</ul>
     </>;
   };
   const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => { dragRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: sftpHeight }; event.currentTarget.setPointerCapture(event.pointerId); };
@@ -330,6 +444,9 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
     {prompt && <Dialog small label={prompt.mode === 'mkdir' ? '새 폴더 이름' : '이름 변경'} onCancel={() => setPrompt(null)}><label>{prompt.mode === 'mkdir' ? '새 폴더 이름' : '새 이름'}<input value={promptValue} onChange={(event) => setPromptValue(event.target.value)} /></label><div className="rd-modal-actions"><button onClick={() => setPrompt(null)}>취소</button><button className="primary" disabled={!promptValue.trim()} onClick={() => void runPrompt()}>확인</button></div></Dialog>}
     {confirm && <Dialog small label="삭제 확인" onCancel={() => setConfirm(null)}><p><strong>{confirm.name}</strong>을(를) 삭제할까요? {confirm.kind === 'dir' && '빈 폴더만 삭제할 수 있습니다.'}</p><div className="rd-modal-actions"><button onClick={() => setConfirm(null)}>취소</button><button className="danger" onClick={() => void confirmDelete()}>삭제</button></div></Dialog>}
     {overwriteName && <Dialog small label="덮어쓰기 확인" onCancel={() => { uploadFlow.cancel(); setOverwriteName(null); }}><p><strong>{overwriteName}</strong> 파일을 덮어쓸까요?</p><div className="rd-modal-actions"><button onClick={() => { uploadFlow.cancel(); setOverwriteName(null); }}>취소</button><button className="danger" onClick={() => { setOverwriteName(null); void uploadFlow.confirm(); }}>덮어쓰기</button></div></Dialog>}
+    {contextMenu && (() => { const target = entryOf(contextMenu.side, contextMenu.name); if (!target) return null; const sel = selOf(contextMenu.side); const items = contextMenuItems({ entry: { name: target.name, type: target.type }, selectionCount: Math.max(1, sel.selected.size), dual }); return <div className="rd-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }}>{items.map((item) => <button role="menuitem" key={item.id} className={item.danger ? 'danger' : ''} onClick={() => runContextAction(item.id)}>{item.label}</button>)}</div>; })()}
+    {bulkDelete && <Dialog small label="삭제 확인" onCancel={() => setBulkDelete(null)}><p><strong>{bulkDelete.items.length}개</strong> 항목을 삭제할까요? {bulkDelete.items.some((item) => item.kind === 'dir') && '빈 폴더는 비어 있어야 삭제할 수 있습니다.'}</p><div className="rd-modal-actions"><button onClick={() => setBulkDelete(null)}>취소</button><button className="danger" onClick={() => void confirmBulkDelete()}>삭제</button></div></Dialog>}
+    {batchConflicts && <Dialog small label="덮어쓰기 확인" onCancel={() => { batchUpload.cancel(); setBatchConflicts(null); }}><p>이미 존재하는 파일 <strong>{batchConflicts.length}개</strong>를 덮어쓸까요?</p><ul className="rd-conflict-list">{batchConflicts.map((name) => <li key={name}>{name}</li>)}</ul><div className="rd-modal-actions"><button onClick={() => { batchUpload.cancel(); setBatchConflicts(null); }}>그만두기</button><button className="danger" onClick={() => { setBatchConflicts(null); void batchUpload.confirmAll(); }}>덮어쓰기</button></div></Dialog>}
   </section>;
 }
 

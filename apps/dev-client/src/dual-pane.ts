@@ -74,3 +74,38 @@ export function planMove(
   const to = joinSftpPath(dest, uniqueName(entry.name, destExisting));
   return { ok: true, from, to };
 }
+
+export interface BulkMoveResult {
+  /** Server-side rename operations to perform, in selection order. */
+  moves: { from: string; to: string }[];
+  /** Entries skipped, with the reason the move is not possible. */
+  skipped: { name: string; reason: 'same-dir' | 'into-subtree' }[];
+}
+
+/**
+ * Plan a bulk move of every `entries` item (listing entries in `sourceDir`) into
+ * `destDir`. Destination names are de-conflicted against the target directory's
+ * existing entries *and* against names already chosen during this batch, so two
+ * selected items never target the same path.
+ */
+export function planBulkMove(
+  sourceDir: string,
+  destDir: string,
+  entries: readonly { name: string; type: string }[],
+  destExisting: readonly string[],
+): BulkMoveResult {
+  const occupied = new Set(destExisting);
+  const moves: { from: string; to: string }[] = [];
+  const skipped: BulkMoveResult['skipped'] = [];
+  for (const entry of entries) {
+    const plan = planMove(sourceDir, destDir, entry, [...occupied]);
+    if (!plan.ok) {
+      skipped.push({ name: entry.name, reason: plan.reason });
+      continue;
+    }
+    moves.push({ from: plan.from, to: plan.to });
+    const toName = plan.to.slice(plan.to.lastIndexOf('/') + 1);
+    occupied.add(toName);
+  }
+  return { moves, skipped };
+}
