@@ -375,7 +375,7 @@ export class SftpSsh2Transport implements SftpTransport {
   private readonly readyTimeoutMs: number;
 
   constructor(opts: { readyTimeoutMs?: number } = {}) {
-    this.readyTimeoutMs = opts.readyTimeoutMs ?? 20_000;
+    this.readyTimeoutMs = opts.readyTimeoutMs ?? 10_000;
   }
 
   async observeFingerprint(target: TransportTarget): Promise<string> {

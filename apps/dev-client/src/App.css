@@ -200,7 +200,8 @@ textarea { min-height: 112px; padding-block: 8px; resize: vertical; font-family:
   .rd-terminal-pane[data-collapsed="true"] .rd-terminal-wrap { display: block; }
   .rd-sftp-pane[data-collapsed="true"] .rd-sftp-body { display: flex; }
   .rd-pane-collapse { display: none; }
-  .rd-split[data-mobile-view="terminal"] .rd-sftp-pane, .rd-split[data-mobile-view="files"] .rd-terminal-pane { visibility: hidden; pointer-events: none; }
+  .rd-split[data-mobile-view="terminal"] .rd-sftp-pane, .rd-split[data-mobile-view="terminal"] .rd-sftp-pane *,
+  .rd-split[data-mobile-view="files"] .rd-terminal-pane, .rd-split[data-mobile-view="files"] .rd-terminal-pane * { visibility: hidden; pointer-events: none; }
   .rd-divider { display: none; }
   .rd-trust { align-items: stretch; flex-direction: column; gap: 5px; }
   .rd-modal { padding: 8px; align-items: end; }

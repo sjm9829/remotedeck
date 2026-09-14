@@ -17,4 +17,14 @@ describe('responsive layout boundaries', () => {
     expect(css).toContain('@container remote-deck (max-width: 599px)');
     expect(css).not.toContain('@media (max-width:');
   });
+
+  // Regression: on mobile the inactive pane is hidden with `visibility: hidden`,
+  // but a descendant that sets `visibility: visible` (e.g. `.rd-row-actions`) would
+  // still paint over the active pane and look like the two panels overlap. The hide
+  // rule must therefore also target the inactive pane's descendants so nothing leaks.
+  it('hides the inactive mobile pane together with its descendants', () => {
+    const css = readFileSync(new URL('../App.css', import.meta.url), 'utf8');
+    expect(css).toContain('.rd-split[data-mobile-view="terminal"] .rd-sftp-pane, .rd-split[data-mobile-view="terminal"] .rd-sftp-pane *');
+    expect(css).toContain('.rd-split[data-mobile-view="files"] .rd-terminal-pane, .rd-split[data-mobile-view="files"] .rd-terminal-pane *');
+  });
 });
