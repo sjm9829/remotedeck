@@ -258,3 +258,80 @@ textarea { min-height: 112px; padding-block: 8px; resize: vertical; font-family:
 .rd-context-menu button.danger { color: #e88a8f; }
 .rd-context-menu button.danger:hover { background: #7a2b30; color: #fff; }
 .rd-conflict-list { max-height: 160px; overflow: auto; margin: 6px 0 0; padding-left: 20px; color: var(--rd-muted); font-size: 12px; }
+
+/* ---- SFTP file browser v2: merged toolbar, columns, status bar, dockable pane ---- */
+.rd-sftp-col { container: sftpcol / inline-size; }
+.rd-file-tools { min-height: 40px; gap: 2px; padding: 4px 6px; background: var(--rd-panel); }
+.rd-tool { position: relative; width: 30px; height: 30px; min-width: 30px; min-height: 30px; display: inline-grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #aab8c9; cursor: pointer; }
+.rd-tool:hover:not(:disabled) { background: var(--rd-panel-3); border-color: var(--rd-border); color: var(--rd-fg); }
+.rd-tool[aria-pressed="true"] { background: #1a2c44; color: var(--rd-accent-strong); }
+.rd-upload.rd-tool { border-color: transparent; background: transparent; }
+.rd-upload.rd-tool:hover { background: var(--rd-panel-3); border-color: var(--rd-border); color: var(--rd-fg); }
+.rd-tool-group { display: inline-flex; align-items: center; gap: 2px; }
+.rd-tool-sep { width: 1px; height: 18px; margin: 0 4px; background: var(--rd-border); }
+.rd-breadcrumb { padding: 0 4px; }
+.rd-breadcrumb .crumb { min-height: 28px; padding: 0 6px; font-size: 12px; }
+.rd-breadcrumb .crumb.current { color: var(--rd-fg); font-weight: 600; }
+.rd-breadcrumb .crumb:not(.current)::after { content: "›"; margin-left: 8px; color: #55657a; }
+
+.rd-file-head, .rd-file-row { grid-template-columns: 30px minmax(0, 1fr) 104px 76px 36px; gap: 0; }
+.rd-file-head { min-height: 28px; padding: 0 6px; background: #131a24; }
+.rd-file-th:nth-child(2) { text-align: left; }
+.rd-file-th.rd-col-mtime, .rd-file-th.rd-col-size { text-align: right; }
+.rd-file-row { min-height: 36px; padding: 0 6px; }
+.rd-file-row .meta { padding-right: 6px; }
+.rd-col-mtime, .rd-col-size { text-align: right; }
+.rd-check { display: grid; place-items: center; }
+.rd-check input { width: 15px; height: 15px; min-height: 0; margin: 0; padding: 0; opacity: 0; accent-color: var(--rd-accent); }
+.rd-file-head .rd-check input, .rd-file-head:hover .rd-check input, .rd-file-row:hover .rd-check input,
+.rd-file-row[aria-selected="true"] .rd-check input, .rd-check input:focus-visible, .rd-check input:checked, .rd-check input:indeterminate { opacity: 1; }
+.rd-file-name { gap: 9px; }
+.rd-file-text { min-width: 0; display: grid; }
+.rd-file-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rd-file-sub { display: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--rd-muted); font-size: 10.5px; }
+.rd-row-more { width: 30px; height: 30px; min-width: 30px; min-height: 30px; opacity: 0; color: #aab8c9; }
+.rd-file-row:hover .rd-row-more, .rd-file-row[aria-selected="true"] .rd-row-more, .rd-row-more:focus-visible { opacity: 1; }
+.rd-filelist { position: relative; }
+.rd-filelist.is-drop { outline: 2px dashed var(--rd-accent); outline-offset: -4px; background: #14233a; }
+.rd-filelist.is-drop::after { content: "여기에 놓아 업로드"; position: sticky; bottom: 10px; display: block; text-align: center; color: var(--rd-accent-strong); font-weight: 600; pointer-events: none; }
+.rd-file-status { flex: 0 0 auto; min-height: 32px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 10px; border-top: 1px solid var(--rd-border); background: #131a24; color: var(--rd-muted); font-size: 11px; }
+.rd-status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #aab8c9; }
+.rd-status-actions { display: flex; flex: 0 0 auto; gap: 4px; }
+.rd-status-busy.is-busy { color: var(--rd-warn); }
+.rd-sftp-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 6px 5px 10px; border-bottom: 1px solid #5c2a2e; background: #2a1719; color: #f0a3a8; font-size: 12px; overflow-wrap: anywhere; }
+.rd-sftp-error .icon { flex: 0 0 auto; min-width: 26px; min-height: 26px; color: inherit; }
+.rd-sftp-pane[data-slim="true"] > .rd-pane-title { display: none; }
+.rd-empty-state { padding: 28px 16px; }
+
+/* Narrow file pane (right dock, split view, phones): two-line rows, no columns. */
+@container sftpcol (max-width: 460px) {
+  .rd-file-head { display: flex; align-items: center; gap: 2px; }
+  .rd-file-head .rd-file-th:last-child { display: none; }
+  .rd-file-head .rd-file-th.rd-col-mtime, .rd-file-head .rd-file-th.rd-col-size { text-align: left; }
+  .rd-file-row { grid-template-columns: 30px minmax(0, 1fr) 36px; min-height: 46px; }
+  .rd-file-row .meta { display: none; }
+  .rd-file-sub { display: block; }
+}
+
+/* Docked right of the terminal (wide windows). */
+.rd-split[data-dock="right"] { flex-direction: row; }
+.rd-split[data-dock="right"] .rd-terminal-pane { flex: 1 1 0; min-width: 0; }
+.rd-split[data-dock="right"] .rd-divider { flex: 0 0 6px; width: 6px; height: auto; border-block: 0; border-inline: 1px solid var(--rd-border); cursor: col-resize; }
+.rd-split[data-dock="right"] .rd-sftp-pane { flex: 0 0 auto; width: 480px; min-width: 320px; max-width: none; height: auto; min-height: 0; max-height: none; align-self: stretch; }
+.rd-split[data-dock="right"] .rd-sftp-pane[data-collapsed="true"] { width: auto; min-width: 0; height: 32px; align-self: flex-start; }
+.rd-split[data-dock="right"][data-ssh-collapsed="true"] .rd-sftp-pane { flex: 1 1 auto; width: auto; height: auto; }
+
+@container remote-deck (max-width: 599px) {
+  .rd-desk-only { display: none; }
+  .rd-file-tools { padding: 3px 4px; }
+}
+
+@media (pointer: coarse) {
+  .rd-check input, .rd-row-more { opacity: 1; }
+  .rd-tool { width: 38px; height: 38px; }
+  .rd-file-row { min-height: 50px; }
+}
+
+.rd-breadcrumb .crumb { display: inline-flex; align-items: center; }
+.rd-row-more { border-color: transparent; background: transparent; }
+.rd-row-more:hover:not(:disabled) { background: var(--rd-panel-3); border-color: var(--rd-border); }

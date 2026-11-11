@@ -36,3 +36,36 @@ export function sortEntries(entries: readonly SftpEntry[], key: SortKey, dir: So
 export function fileIcon(type: string): string {
   return type === 'directory' ? '📁' : '📄';
 }
+
+/**
+ * Compact modified-time label from a Unix timestamp in seconds. Same year: `MM-DD HH:mm`;
+ * older: `YYYY-MM-DD`. Zero/absent timestamps (some servers omit them) render as an empty cell.
+ */
+export function formatMtime(mtimeSeconds: number | undefined, now: Date = new Date()): string {
+  if (!mtimeSeconds || mtimeSeconds <= 0) return '';
+  const d = new Date(mtimeSeconds * 1000);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const date = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return d.getFullYear() === now.getFullYear() ? `${date} ${pad(d.getHours())}:${pad(d.getMinutes())}` : `${d.getFullYear()}-${date}`;
+}
+
+export interface SelectionSummary { count: number; files: number; folders: number; bytes: number }
+
+/** Totals for the status bar: how many items are selected and the combined size of the files. */
+export function summarizeSelection(entries: readonly SftpEntry[], selected: ReadonlySet<string>): SelectionSummary {
+  let files = 0; let folders = 0; let bytes = 0;
+  for (const entry of entries) {
+    if (!selected.has(entry.name)) continue;
+    if (entry.type === 'directory') folders += 1; else { files += 1; bytes += entry.size ?? 0; }
+  }
+  return { count: files + folders, files, folders, bytes };
+}
+
+/** `폴더 2 · 파일 14` style listing summary. */
+export function listingSummary(entries: readonly SftpEntry[]): string {
+  const folders = entries.filter((entry) => entry.type === 'directory').length;
+  const files = entries.length - folders;
+  if (entries.length === 0) return '비어 있음';
+  return [folders ? `폴더 ${folders}` : '', files ? `파일 ${files}` : ''].filter(Boolean).join(' · ');
+}

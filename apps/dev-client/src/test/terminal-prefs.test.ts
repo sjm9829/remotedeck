@@ -39,3 +39,19 @@ describe('terminal prefs', () => {
     expect(() => saveFontSize(12)).not.toThrow();
   });
 });
+
+import { loadDock, saveDock } from '../terminal-prefs.js';
+describe('dock preference', () => {
+  it('round-trips and does not clobber the font size', () => {
+    saveFontSize(17);
+    saveDock('bottom');
+    expect(loadDock()).toBe('bottom');
+    expect(loadFontSize()).toBe(17);
+    saveFontSize(18);
+    expect(loadDock()).toBe('bottom');
+  });
+  it('ignores junk', () => {
+    store.set('remotedeck:prefs:v1', '{"dock":"left"}');
+    expect(loadDock()).toBeNull();
+  });
+});

@@ -50,3 +50,22 @@ describe('fileIcon', () => {
     expect(fileIcon('link')).toBe('📄');
   });
 });
+
+import { formatMtime, listingSummary, summarizeSelection } from '../sftp-list.js';
+describe('sftp list presentation', () => {
+  const now = new Date(2026, 10, 12, 12, 0, 0);
+  it('formats modified times compactly', () => {
+    const sec = (d: Date) => Math.floor(d.getTime() / 1000);
+    expect(formatMtime(sec(new Date(2026, 10, 11, 22, 5)), now)).toBe('11-11 22:05');
+    expect(formatMtime(sec(new Date(2025, 2, 4, 9, 0)), now)).toBe('2025-03-04');
+    expect(formatMtime(0, now)).toBe('');
+    expect(formatMtime(undefined, now)).toBe('');
+  });
+  it('summarizes the selection and the listing', () => {
+    const entries = [{ name: 'a', type: 'file', size: 10 }, { name: 'b', type: 'file', size: 5 }, { name: 'd', type: 'directory' }];
+    expect(summarizeSelection(entries, new Set(['a', 'd']))).toEqual({ count: 2, files: 1, folders: 1, bytes: 10 });
+    expect(summarizeSelection(entries, new Set())).toEqual({ count: 0, files: 0, folders: 0, bytes: 0 });
+    expect(listingSummary(entries)).toBe('폴더 1 · 파일 2');
+    expect(listingSummary([])).toBe('비어 있음');
+  });
+});

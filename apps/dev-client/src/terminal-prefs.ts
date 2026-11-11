@@ -28,21 +28,43 @@ export function stepFontSize(current: number, delta: number): number {
   return clampFontSize(current + delta);
 }
 
-export function loadFontSize(): number | null {
+type Prefs = { fontSize?: unknown; dock?: unknown };
+
+function readPrefs(): Prefs {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { fontSize?: unknown };
-    return typeof parsed.fontSize === 'number' && Number.isFinite(parsed.fontSize) ? clampFontSize(parsed.fontSize) : null;
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Prefs) : {};
   } catch {
-    return null;
+    return {};
   }
 }
 
-export function saveFontSize(size: number): void {
+function writePrefs(update: Prefs): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ fontSize: clampFontSize(size) }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...readPrefs(), ...update }));
   } catch {
     // Private browsing or quota: the preference simply does not persist.
   }
+}
+
+export function loadFontSize(): number | null {
+  const { fontSize } = readPrefs();
+  return typeof fontSize === 'number' && Number.isFinite(fontSize) ? clampFontSize(fontSize) : null;
+}
+
+export function saveFontSize(size: number): void {
+  writePrefs({ fontSize: clampFontSize(size) });
+}
+
+export type SftpDock = 'right' | 'bottom';
+
+export function loadDock(): SftpDock | null {
+  const { dock } = readPrefs();
+  return dock === 'right' || dock === 'bottom' ? dock : null;
+}
+
+export function saveDock(dock: SftpDock): void {
+  writePrefs({ dock });
 }

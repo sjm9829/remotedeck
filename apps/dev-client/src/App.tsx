@@ -14,14 +14,16 @@ import { trustPendingSession, type PendingSshTrust } from './ssh-trust-flow.js';
 import { activateMostRecentHostTab, activateWorkspaceTab, addWorkspaceTab, closeWorkspaceTab, createWorkspaceTabsState, setWorkspaceTabSession, type WorkspaceTab, type WorkspaceTabsState } from './workspace-tabs.js';
 import { MAX_AUTO_ATTEMPTS, backoffMs, classifyClose, isSessionGoneError, isTerminalSessionState } from './reconnect-policy.js';
 import { createHeartbeat } from './heartbeat.js';
-import { FONT_MAX, FONT_MIN, TERMINAL_FONT_FAMILY, TERMINAL_SCROLLBACK, defaultFontSize, loadFontSize, saveFontSize, stepFontSize } from './terminal-prefs.js';
+import { FONT_MAX, FONT_MIN, TERMINAL_FONT_FAMILY, TERMINAL_SCROLLBACK, defaultFontSize, loadDock, loadFontSize, saveDock, saveFontSize, stepFontSize, type SftpDock } from './terminal-prefs.js';
 import { DEFAULT_SFTP_HEIGHT, MAX_SFTP_HEIGHT, MIN_SFTP_HEIGHT, clampSftpHeight, resizeSftpWithKey } from './split-layout.js';
 import { buildCredentialRequest, emptyCredentialDraft, type NewCredentialDraft } from './credential-draft.js';
 import { persistHost } from './host-save.js';
 import { layoutForWidth, type RemoteDeckLayout } from './responsive-layout.js';
 import { MOBILE_KEY_ROWS, NO_MODIFIERS, buttonPress, resolveKeyboardKey, toggleModifier, type ModifierState, type MobileKey } from './mobile-keys.js';
 import { joinSftpPath, parentSftpPath } from './sftp-path.js';
-import { formatSize, sortEntries, fileIcon, type SortKey, type SortDir } from './sftp-list.js';
+import { formatMtime, formatSize, listingSummary, sortEntries, summarizeSelection, type SortKey, type SortDir } from './sftp-list.js';
+import { DEFAULT_SFTP_WIDTH, MIN_SFTP_WIDTH, canDockRight, clampSftpWidth, effectiveDock, initialDock, resizeSftpWidthWithKey } from './dock-layout.js';
+import { IconChevronDown, IconColumns, IconDockBottom, IconDockRight, IconFile, IconFolder, IconFolderPlus, IconMore, IconRefresh, IconUp, IconUpload } from './icons.js';
 import { DEFAULT_SPLIT, clampSplit, otherSide, planBulkMove, planMove, resizeSplitWithKey, type PaneSide } from './dual-pane.js';
 import { createSftpUnmountCleanup } from './sftp-cleanup.js';
 import { shouldStreamDownload, summarizeBulkDelete } from './sftp-download.js';
@@ -37,6 +39,8 @@ import { terminalIdentity } from './terminal-identity.js';
 import { saveTabState, loadTabState, type PersistedTabState } from './session-persistence.js';
 
 const DEV_DIRECT = import.meta.env.VITE_REMOTEDECK_MODE === 'direct';
+/** Width of the always-visible host list in the desktop layout (matches `.rd-main` grid). */
+const HOST_LIST_WIDTH = 238;
 type FileEntry = { name: string; type: string; size?: number };
 type SftpTrust = { id: string; fingerprint: string };
 type ConfirmState = { kind: 'file' | 'dir'; name: string; side: PaneSide } | null;
@@ -160,7 +164,7 @@ export function reconnectLabel(state: SshUiState): string | null {
   return null;
 }
 
-export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId, fontSize = 14, onFontStep }: { tab: WorkspaceTab; host: Host; client: RemoteDeckClient; active: boolean; fontSize?: number; onFontStep?: (delta: number) => void; onStatus?: (tabId: string, status: 'idle' | 'connecting' | 'connected' | 'error') => void; onSessionId?: (tabId: string, sessionId: string | null) => void }) {
+export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId, fontSize = 14, onFontStep, containerWidth = 0, isMobile = false }: { tab: WorkspaceTab; host: Host; client: RemoteDeckClient; active: boolean; fontSize?: number; onFontStep?: (delta: number) => void; containerWidth?: number; isMobile?: boolean; onStatus?: (tabId: string, status: 'idle' | 'connecting' | 'connected' | 'error') => void; onSessionId?: (tabId: string, sessionId: string | null) => void }) {
   const [sshState, setSshState] = useState<SshUiState>('idle');
   const [sshStatus, setSshStatus] = useState('연결 전');
   const [sessionId, setSessionId] = useState(tab.sessionId ?? '');
@@ -195,6 +199,14 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   const applyModifiers = useCallback((next: ModifierState) => { modifierRef.current = next; setModsActive(next); }, []);
   const [sftpHeight, setSftpHeight] = useState(DEFAULT_SFTP_HEIGHT);
   const dragRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
+  // File pane placement: docked right of the terminal in wide windows, otherwise below it.
+  const [dockPref, setDockPref] = useState<SftpDock>(() => initialDock(loadDock(), containerWidth));
+  const dockMode = effectiveDock(dockPref, containerWidth, isMobile);
+  const dockAvailable = canDockRight(containerWidth, isMobile);
+  const [sftpWidth, setSftpWidth] = useState(DEFAULT_SFTP_WIDTH);
+  const dragWRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const toggleDock = () => { const next: SftpDock = dockMode === 'right' ? 'bottom' : 'right'; setDockPref(next); saveDock(next); };
+  const [dropSide, setDropSide] = useState<PaneSide | null>(null);
   const [sftpId, setSftpId] = useState('');
   const [sftpPath, setSftpPath] = useState('');
   const [sftpFiles, setSftpFiles] = useState<FileEntry[]>([]);
@@ -311,7 +323,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     controller.start(); termRef.current = terminal; ctrlRef.current = controller;
     return () => { controller.dispose(); closeSocketRef(wsRef); terminal.dispose(); termRef.current = null; ctrlRef.current = null; modifierRef.current = NO_MODIFIERS; };
   }, [terminalKey]);
-  useEffect(() => { if (active) requestAnimationFrame(() => ctrlRef.current?.fitNow()); }, [active, sshCollapsed, sftpCollapsed, sftpHeight]);
+  useEffect(() => { if (active) requestAnimationFrame(() => ctrlRef.current?.fitNow()); }, [active, sshCollapsed, sftpCollapsed, sftpHeight, sftpWidth, dockMode]);
   useEffect(() => { const terminal = termRef.current; if (!terminal || terminal.options.fontSize === fontSize) return; terminal.options.fontSize = fontSize; requestAnimationFrame(() => ctrlRef.current?.fitNow()); }, [fontSize]);
 
   // A bar button sends its own bytes without stealing focus from the terminal,
@@ -571,7 +583,15 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   };
   const endSplitDrag = (event: React.PointerEvent<HTMLDivElement>) => { if (dragSplitRef.current?.pointerId === event.pointerId) dragSplitRef.current = null; };
   const splitKey = (event: React.KeyboardEvent<HTMLDivElement>) => { const next = resizeSplitWithKey(split, event.key); if (next !== split) { event.preventDefault(); setSplit(next); } };
-  const renderBrowser = (side: PaneSide) => {
+  const isCoarsePointer = () => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+  const openRowMenu = (event: ReactMouseEvent, side: PaneSide, entry: FileEntry) => {
+    event.stopPropagation();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const sel = selOf(side);
+    if (!sel.selected.has(entry.name)) setSelOf(side)(selectEntry(namesOf(side), entry.name, {}, sel));
+    setContextMenu({ side, name: entry.name, x: Math.max(8, rect.right - 176), y: rect.bottom + 2 });
+  };
+  const renderBrowser = (side: PaneSide, withGlobalControls: boolean) => {
     const path = side === 'a' ? sftpPath : bPath;
     const files = side === 'a' ? sftpFiles : bFiles;
     const sorted = side === 'a' ? sortedFiles : sortedB;
@@ -579,17 +599,65 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     const selCount = sel.selected.size;
     const crumbs = breadcrumbs(path);
     const goto = (p: string) => navigate(side, p);
+    const summary = summarizeSelection(files, sel.selected);
+    const sortMark = (key: SortKey) => sortKey === key ? (sortDir === 'asc' ? '▲' : '▼') : '';
+    const ariaSort = (key: SortKey) => sortKey === key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none';
+    const allSelected = files.length > 0 && selCount === files.length;
     return <>
-      <div className="rd-file-tools"><nav className="rd-breadcrumb" aria-label="경로">{crumbs.map((crumb, index) => index === crumbs.length - 1 ? <span className="crumb current" key={`${side}-c${index}`} aria-current="page">{crumb.label}</span> : <button className="crumb" key={`${side}-c${index}`} disabled={sftpBusy} onClick={() => goto(crumb.path)}>{crumb.label}</button>)}<button className="crumb sep" disabled={!path || sftpBusy} onClick={() => goto(parentSftpPath(path))} aria-label="상위 폴더">↑</button></nav><button className="compact" disabled={sftpBusy} onClick={() => goto(path)} aria-label="파일 새로고침">↻</button>{files.length > 0 && <button className="compact" disabled={sftpBusy} onClick={() => setSelOf(side)(selectAll(sorted.map((entry) => entry.name)))}>전체</button>}<button className="compact" disabled={sftpBusy} onClick={() => { setPromptValue(''); setPrompt({ mode: 'mkdir', side }); }}>새 폴더</button><label className="rd-upload compact">업로드<input type="file" aria-label="업로드할 파일 선택" disabled={sftpBusy} onChange={(event) => void selectUpload(event, side)} /></label></div>
-      {selCount > 0 && <div className="rd-file-bulk"><span>{selCount}개 선택</span><button className="compact" disabled={sftpBusy} onClick={() => downloadSelection(side)}>다운로드</button>{dual && <button className="compact" disabled={sftpBusy} onClick={() => void moveSelection(side)}>다른 창으로</button>}<button className="compact danger" disabled={sftpBusy} onClick={() => deleteSelection(side)}>삭제</button><button className="compact" onClick={() => setSelOf(side)(clearSelection())}>해제</button></div>}
-      <div className="rd-file-head" role="row"><button className={`rd-file-th ${sortKey === 'name' ? 'active' : ''}`} role="columnheader" aria-sort={sortKey === 'name' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onClick={() => toggleSort('name')}>이름 {sortKey === 'name' ? (sortDir === 'asc' ? '▲' : '▼') : ''}</button><button className={`rd-file-th ${sortKey === 'size' ? 'active' : ''}`} role="columnheader" aria-sort={sortKey === 'size' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'} onClick={() => toggleSort('size')}>크기 {sortKey === 'size' ? (sortDir === 'asc' ? '▲' : '▼') : ''}</button><span className="rd-file-th" /></div>
-      <ul className="rd-filelist" role="listbox" aria-multiselectable="true" onDragOver={(event) => event.preventDefault()} onDrop={(event) => dropUpload(event, side)}>{sorted.map((entry) => { const selected = sel.selected.has(entry.name); return <li className="rd-file-row" key={`${side}/${entry.name}`} role="option" aria-selected={selected} tabIndex={0} onClick={(event) => selectRow(event, side, entry.name)} onDoubleClick={() => openEntry(side, entry)} onContextMenu={(event) => openContextMenu(event, side, entry)} onKeyDown={(event) => rowKeyDown(event, side, entry)}><span className="rd-file-name"><span aria-hidden="true">{fileIcon(entry.type)}</span>{entry.name}</span><span className="meta">{entry.type === 'directory' ? '폴더' : formatSize(entry.size)}</span><div className="rd-row-actions">{entry.type === 'file' && <button className="icon" aria-label={`${entry.name} 다운로드`} onClick={(event) => { event.stopPropagation(); void download(entry.name, side); }}>↓</button>}{dual && <button className="icon" aria-label={`${entry.name}를 다른 창으로 이동`} onClick={(event) => { event.stopPropagation(); void moveEntry(side, entry); }}>→</button>}<button className="icon" aria-label={`${entry.name} 이름 변경`} onClick={(event) => { event.stopPropagation(); setPromptValue(entry.name); setPrompt({ mode: 'rename', from: entry.name, side }); }}>✎</button><button className="icon danger" aria-label={`${entry.name} 삭제`} onClick={(event) => { event.stopPropagation(); setConfirm({ kind: entry.type === 'directory' ? 'dir' : 'file', name: entry.name, side }); }}>×</button></div></li>; })}{files.length === 0 && <li className="rd-empty-state">빈 폴더입니다.</li>}</ul>
+      <div className="rd-file-tools">
+        <button className="icon rd-tool" disabled={!path || sftpBusy} onClick={() => goto(parentSftpPath(path))} aria-label="상위 폴더" title="상위 폴더"><IconUp /></button>
+        <nav className="rd-breadcrumb" aria-label="경로">{crumbs.map((crumb, index) => index === crumbs.length - 1 ? <span className="crumb current" key={`${side}-c${index}`} aria-current="page">{crumb.label}</span> : <button className="crumb" key={`${side}-c${index}`} disabled={sftpBusy} onClick={() => goto(crumb.path)}>{crumb.label}</button>)}</nav>
+        <button className="icon rd-tool" disabled={sftpBusy} onClick={() => goto(path)} aria-label="파일 새로고침" title="새로고침"><IconRefresh /></button>
+        <button className="icon rd-tool" disabled={sftpBusy} onClick={() => { setPromptValue(''); setPrompt({ mode: 'mkdir', side }); }} aria-label="새 폴더" title="새 폴더"><IconFolderPlus /></button>
+        <label className="icon rd-tool rd-upload" title="업로드" aria-label="업로드"><IconUpload /><input type="file" aria-label="업로드할 파일 선택" disabled={sftpBusy} onChange={(event) => void selectUpload(event, side)} /></label>
+        {withGlobalControls && <span className="rd-tool-group rd-desk-only"><span className="rd-tool-sep" aria-hidden="true" />
+          <button className="icon rd-tool" aria-pressed={dual} aria-label="SFTP 창 분할" title="두 개의 파일 창을 나란히 표시" onClick={toggleDual}><IconColumns /></button>
+          {dockAvailable && <button className="icon rd-tool" aria-label={dockMode === 'right' ? '파일 창을 아래로' : '파일 창을 오른쪽으로'} title={dockMode === 'right' ? '파일 창을 터미널 아래로 이동' : '파일 창을 터미널 오른쪽으로 이동'} onClick={toggleDock}>{dockMode === 'right' ? <IconDockBottom /> : <IconDockRight />}</button>}
+          <button className="icon rd-tool" aria-label="SFTP 접기" aria-expanded={!sftpCollapsed} title="파일 창 접기" onClick={toggleSftpCollapsed}><IconChevronDown /></button>
+        </span>}
+      </div>
+      <div className="rd-file-head" role="row">
+        <span className="rd-check"><input type="checkbox" aria-label="전체 선택" checked={allSelected} ref={(element) => { if (element) element.indeterminate = selCount > 0 && !allSelected; }} disabled={files.length === 0} onChange={() => setSelOf(side)(allSelected ? clearSelection() : selectAll(sorted.map((entry) => entry.name)))} /></span>
+        <button className={`rd-file-th ${sortKey === 'name' ? 'active' : ''}`} role="columnheader" aria-sort={ariaSort('name')} onClick={() => toggleSort('name')}>이름 {sortMark('name')}</button>
+        <button className={`rd-file-th rd-col-mtime ${sortKey === 'mtime' ? 'active' : ''}`} role="columnheader" aria-sort={ariaSort('mtime')} onClick={() => toggleSort('mtime')}>수정일 {sortMark('mtime')}</button>
+        <button className={`rd-file-th rd-col-size ${sortKey === 'size' ? 'active' : ''}`} role="columnheader" aria-sort={ariaSort('size')} onClick={() => toggleSort('size')}>크기 {sortMark('size')}</button>
+        <span className="rd-file-th" />
+      </div>
+      <ul className={`rd-filelist${dropSide === side ? ' is-drop' : ''}`} role="listbox" aria-multiselectable="true"
+        onDragOver={(event) => event.preventDefault()}
+        onDragEnter={(event) => { if (event.dataTransfer?.types?.includes('Files')) setDropSide(side); }}
+        onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropSide(null); }}
+        onDrop={(event) => { setDropSide(null); dropUpload(event, side); }}>
+        {sorted.map((entry) => {
+          const selected = sel.selected.has(entry.name);
+          const isDir = entry.type === 'directory';
+          const mtime = formatMtime(entry.mtime);
+          const size = isDir ? '' : formatSize(entry.size);
+          return <li className="rd-file-row" key={`${side}/${entry.name}`} role="option" aria-selected={selected} tabIndex={0}
+            onClick={(event) => { if (isCoarsePointer() && isDir && !event.ctrlKey && !event.metaKey && !event.shiftKey) { setContextMenu(null); openEntry(side, entry); return; } selectRow(event, side, entry.name); }}
+            onDoubleClick={() => openEntry(side, entry)} onContextMenu={(event) => openContextMenu(event, side, entry)} onKeyDown={(event) => rowKeyDown(event, side, entry)}>
+            <span className="rd-check" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`${entry.name} 선택`} checked={selected} onChange={() => setSelOf(side)(selectEntry(namesOf(side), entry.name, { additive: true }, selOf(side)))} /></span>
+            <span className="rd-file-name">{isDir ? <IconFolder /> : <IconFile />}<span className="rd-file-text"><span className="rd-file-label">{entry.name}</span><span className="rd-file-sub">{[mtime, isDir ? '폴더' : size].filter(Boolean).join(' · ')}</span></span></span>
+            <span className="meta rd-col-mtime">{mtime}</span>
+            <span className="meta rd-col-size">{isDir ? '폴더' : size}</span>
+            <button className="icon rd-row-more" aria-label={`${entry.name} 메뉴`} aria-haspopup="menu" onClick={(event) => openRowMenu(event, side, entry)}><IconMore /></button>
+          </li>;
+        })}
+        {files.length === 0 && <li className="rd-empty-state">빈 폴더입니다. 파일을 끌어다 놓으면 업로드됩니다.</li>}
+      </ul>
+      <div className="rd-file-status" role="status">{selCount > 0
+        ? <><span className="rd-status-text">{selCount}개 선택{summary.files > 0 ? ` · ${formatSize(summary.bytes)}` : ''}</span><span className="rd-status-actions"><button className="compact" disabled={sftpBusy || summary.files === 0} onClick={() => downloadSelection(side)}>다운로드</button>{dual && <button className="compact" disabled={sftpBusy} onClick={() => void moveSelection(side)}>다른 창으로</button>}<button className="compact danger" disabled={sftpBusy} onClick={() => deleteSelection(side)}>삭제</button><button className="compact" onClick={() => setSelOf(side)(clearSelection())}>해제</button></span></>
+        : <><span className="rd-status-text">{listingSummary(files)}</span><span className={`rd-status-busy${sftpBusy ? ' is-busy' : ''}`}>{sftpBusy ? sftpStatus.startsWith('업로드') ? sftpStatus : '작업 중…' : ''}</span></>}</div>
     </>;
   };
   const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => { dragRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: sftpHeight }; event.currentTarget.setPointerCapture(event.pointerId); };
   const drag = (event: ReactPointerEvent<HTMLDivElement>) => { const current = dragRef.current; if (current?.pointerId === event.pointerId) setSftpHeight(clampSftpHeight(current.startHeight + current.startY - event.clientY)); };
   const stopDrag = (event: ReactPointerEvent<HTMLDivElement>) => { if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null; };
   const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => { const height = resizeSftpWithKey(sftpHeight, event.key); if (height !== sftpHeight) { event.preventDefault(); setSftpHeight(height); } };
+  const startDragW = (event: ReactPointerEvent<HTMLDivElement>) => { dragWRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: sftpWidth }; event.currentTarget.setPointerCapture(event.pointerId); };
+  const dragW = (event: ReactPointerEvent<HTMLDivElement>) => { const current = dragWRef.current; if (current?.pointerId === event.pointerId) setSftpWidth(clampSftpWidth(current.startWidth + current.startX - event.clientX, containerWidth)); };
+  const stopDragW = (event: ReactPointerEvent<HTMLDivElement>) => { if (dragWRef.current?.pointerId === event.pointerId) dragWRef.current = null; };
+  const resizeWidthWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => { const width = resizeSftpWidthWithKey(sftpWidth, event.key, containerWidth); if (width !== sftpWidth) { event.preventDefault(); setSftpWidth(width); } };
   const segmentKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
@@ -615,20 +683,23 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
         {MOBILE_KEY_ROWS[1].map((key) => <button key={key.id} type="button" title={key.title} aria-label={key.title} className="rd-mkey" onPointerDown={(event) => { event.preventDefault(); pressMobileKey(key); }}>{key.label}</button>)}
       </div>
     </div>
-    <div className="rd-split" data-mobile-view={mobileView} data-ssh-collapsed={sshCollapsed} data-sftp-collapsed={sftpCollapsed}>
+    <div className="rd-split" data-mobile-view={mobileView} data-ssh-collapsed={sshCollapsed} data-sftp-collapsed={sftpCollapsed} data-dock={dockMode}>
       <div id={terminalPanelId} role="tabpanel" className="rd-terminal-pane" aria-label={`${host.name} 터미널`} data-collapsed={sshCollapsed}><div className="rd-terminal-title"><span>SSH 터미널</span><span className="rd-pane-title-actions"><span className="rd-session-id">{sessionId ? `세션 ${sessionId.slice(0, 8)}` : '대기'}</span><button className="rd-pane-collapse" aria-label={`SSH ${sshCollapsed ? '펼치기' : '접기'}`} aria-expanded={!sshCollapsed} onClick={toggleSshCollapsed}>{sshCollapsed ? '펼치기' : '접기'}</button></span></div><div className="rd-terminal-wrap" ref={termEl} /></div>
-      {!sftpCollapsed && !sshCollapsed && <div className="rd-divider" role="separator" aria-label="SSH와 SFTP 패널 높이" aria-orientation="horizontal" aria-valuemin={MIN_SFTP_HEIGHT} aria-valuemax={MAX_SFTP_HEIGHT} aria-valuenow={sftpHeight} tabIndex={0} onPointerDown={startDrag} onPointerMove={drag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onKeyDown={resizeWithKeyboard} />}
-      <aside id={filesPanelId} role="tabpanel" className="rd-sftp-pane" aria-label={`${host.name} SFTP 파일`} data-collapsed={sftpCollapsed} style={!sftpCollapsed && !sshCollapsed ? { height: sftpHeight } : undefined}><div className="rd-pane-title"><span>SFTP</span><span className="rd-pane-title-actions"><span className={sftpError ? 'error' : ''}>{sftpBusy ? '작업 중…' : sftpStatus}</span><button className="rd-pane-collapse" aria-pressed={dual} aria-label="SFTP 창 분할" title="두 개의 파일 창을 나란히 표시" onClick={toggleDual}>분할</button><button className="rd-pane-collapse" aria-label={`SFTP ${sftpCollapsed ? '펼치기' : '접기'}`} aria-expanded={!sftpCollapsed} onClick={toggleSftpCollapsed}>{sftpCollapsed ? '펼치기' : '접기'}</button></span></div><div className="rd-sftp-body">
+      {!sftpCollapsed && !sshCollapsed && (dockMode === 'right'
+        ? <div className="rd-divider rd-divider--v" role="separator" aria-label="터미널과 SFTP 패널 너비" aria-orientation="vertical" aria-valuemin={MIN_SFTP_WIDTH} aria-valuemax={Math.max(MIN_SFTP_WIDTH, containerWidth)} aria-valuenow={sftpWidth} tabIndex={0} onPointerDown={startDragW} onPointerMove={dragW} onPointerUp={stopDragW} onPointerCancel={stopDragW} onKeyDown={resizeWidthWithKeyboard} />
+        : <div className="rd-divider" role="separator" aria-label="SSH와 SFTP 패널 높이" aria-orientation="horizontal" aria-valuemin={MIN_SFTP_HEIGHT} aria-valuemax={MAX_SFTP_HEIGHT} aria-valuenow={sftpHeight} tabIndex={0} onPointerDown={startDrag} onPointerMove={drag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onKeyDown={resizeWithKeyboard} />)}
+      <aside id={filesPanelId} role="tabpanel" className="rd-sftp-pane" aria-label={`${host.name} SFTP 파일`} data-collapsed={sftpCollapsed} data-slim={Boolean(sftpId) && !sftpCollapsed && !dual} style={!sftpCollapsed && !sshCollapsed ? (dockMode === 'right' ? { width: sftpWidth } : { height: sftpHeight }) : undefined}><div className="rd-pane-title"><span>SFTP</span><span className="rd-pane-title-actions"><span className={sftpError ? 'error' : ''}>{sftpBusy ? '작업 중…' : sftpStatus}</span><button className="rd-pane-collapse" aria-pressed={dual} aria-label="SFTP 창 분할" title="두 개의 파일 창을 나란히 표시" onClick={toggleDual}>분할</button>{dockAvailable && <button className="rd-pane-collapse" aria-label={dockMode === 'right' ? '파일 창을 아래로' : '파일 창을 오른쪽으로'} onClick={toggleDock}>{dockMode === 'right' ? '아래로' : '오른쪽으로'}</button>}<button className="rd-pane-collapse" aria-label={`SFTP ${sftpCollapsed ? '펼치기' : '접기'}`} aria-expanded={!sftpCollapsed} onClick={toggleSftpCollapsed}>{sftpCollapsed ? '펼치기' : '접기'}</button></span></div><div className="rd-sftp-body">
         {sftpTrust && <div className="rd-trust compact-trust" role="alert"><span>SFTP 키 확인</span><code>{sftpTrust.fingerprint}</code><button className="primary compact" onClick={() => void approveSftpTrust()}>신뢰</button></div>}
-        {sftpError && <div className="rd-sftp-unavailable" role="status">파일 패널만 사용할 수 없습니다.<br />{sftpError}<button className="compact" onClick={() => void connectSftp()}>다시 시도</button></div>}
+        {sftpError && !sftpId && <div className="rd-sftp-unavailable" role="status">파일 패널만 사용할 수 없습니다.<br />{sftpError}<button className="compact" onClick={() => void connectSftp()}>다시 시도</button></div>}
+        {sftpError && sftpId && <div className="rd-sftp-error" role="alert"><span>{sftpError}</span><button className="icon" aria-label="오류 닫기" onClick={() => setSftpError('')}>×</button></div>}
         {!sftpId && !sftpTrust && !sftpError && <div className="rd-empty-state">연결하면 이 서버의 파일을 함께 볼 수 있습니다.</div>}
-        {sftpId && (dual ? <div className="rd-sftp-duo" ref={duoRef}><div className="rd-sftp-col" style={{ flexGrow: split, flexBasis: 0 }}>{renderBrowser('a')}</div><div className="rd-sftp-vdivider" role="separator" aria-orientation="vertical" aria-label="두 파일 창 너비 조절" aria-valuemin={25} aria-valuemax={75} aria-valuenow={Math.round(split * 100)} tabIndex={0} onPointerDown={startSplitDrag} onPointerMove={moveSplitDrag} onPointerUp={endSplitDrag} onPointerCancel={endSplitDrag} onKeyDown={splitKey} /><div className="rd-sftp-col" style={{ flexGrow: 1 - split, flexBasis: 0 }}>{renderBrowser('b')}</div></div> : <div className="rd-sftp-col">{renderBrowser('a')}</div>)}
+        {sftpId && (dual ? <div className="rd-sftp-duo" ref={duoRef}><div className="rd-sftp-col" style={{ flexGrow: split, flexBasis: 0 }}>{renderBrowser('a', false)}</div><div className="rd-sftp-vdivider" role="separator" aria-orientation="vertical" aria-label="두 파일 창 너비 조절" aria-valuemin={25} aria-valuemax={75} aria-valuenow={Math.round(split * 100)} tabIndex={0} onPointerDown={startSplitDrag} onPointerMove={moveSplitDrag} onPointerUp={endSplitDrag} onPointerCancel={endSplitDrag} onKeyDown={splitKey} /><div className="rd-sftp-col" style={{ flexGrow: 1 - split, flexBasis: 0 }}>{renderBrowser('b', false)}</div></div> : <div className="rd-sftp-col">{renderBrowser('a', true)}</div>)}
       </div></aside>
     </div>
     {prompt && <Dialog small label={prompt.mode === 'mkdir' ? '새 폴더 이름' : '이름 변경'} onCancel={() => setPrompt(null)}><label>{prompt.mode === 'mkdir' ? '새 폴더 이름' : '새 이름'}<input value={promptValue} onChange={(event) => setPromptValue(event.target.value)} /></label><div className="rd-modal-actions"><button onClick={() => setPrompt(null)}>취소</button><button className="primary" disabled={!promptValue.trim()} onClick={() => void runPrompt()}>확인</button></div></Dialog>}
     {confirm && <Dialog small label="삭제 확인" onCancel={() => setConfirm(null)}><p><strong>{confirm.name}</strong>을(를) 삭제할까요? {confirm.kind === 'dir' && '빈 폴더만 삭제할 수 있습니다.'}</p><div className="rd-modal-actions"><button onClick={() => setConfirm(null)}>취소</button><button className="danger" onClick={() => void confirmDelete()}>삭제</button></div></Dialog>}
     {overwriteName && <Dialog small label="덮어쓰기 확인" onCancel={() => { uploadFlow.cancel(); setOverwriteName(null); }}><p><strong>{overwriteName}</strong> 파일을 덮어쓸까요?</p><div className="rd-modal-actions"><button onClick={() => { uploadFlow.cancel(); setOverwriteName(null); }}>취소</button><button className="danger" onClick={() => { setOverwriteName(null); void uploadFlow.confirm(); }}>덮어쓰기</button></div></Dialog>}
-    {contextMenu && (() => { const target = entryOf(contextMenu.side, contextMenu.name); if (!target) return null; const sel = selOf(contextMenu.side); const items = contextMenuItems({ entry: { name: target.name, type: target.type }, selectionCount: Math.max(1, sel.selected.size), dual }); return <div className="rd-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }}>{items.map((item) => <button role="menuitem" key={item.id} className={item.danger ? 'danger' : ''} onClick={() => runContextAction(item.id)}>{item.label}</button>)}</div>; })()}
+    {contextMenu && (() => { const target = entryOf(contextMenu.side, contextMenu.name); if (!target) return null; const sel = selOf(contextMenu.side); const items = contextMenuItems({ entry: { name: target.name, type: target.type }, selectionCount: Math.max(1, sel.selected.size), dual }); return <div className="rd-context-menu" role="menu" style={{ left: Math.max(8, Math.min(contextMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 184)), top: Math.max(8, Math.min(contextMenu.y, (typeof window !== 'undefined' ? window.innerHeight : 800) - 8 - items.length * 32)) }}>{items.map((item) => <button role="menuitem" key={item.id} className={item.danger ? 'danger' : ''} onClick={() => runContextAction(item.id)}>{item.label}</button>)}</div>; })()}
     {bulkDelete && <Dialog small label="삭제 확인" onCancel={() => setBulkDelete(null)}><p><strong>{bulkDelete.items.length}개</strong> 항목을 삭제할까요? {bulkDelete.items.some((item) => item.kind === 'dir') && '빈 폴더는 비어 있어야 삭제할 수 있습니다.'}</p><div className="rd-modal-actions"><button onClick={() => setBulkDelete(null)}>취소</button><button className="danger" onClick={() => void confirmBulkDelete()}>삭제</button></div></Dialog>}
     {batchConflicts && <Dialog small label="덮어쓰기 확인" onCancel={() => { batchUpload.cancel(); setBatchConflicts(null); }}><p>이미 존재하는 파일 <strong>{batchConflicts.length}개</strong>를 덮어쓸까요?</p><ul className="rd-conflict-list">{batchConflicts.map((name) => <li key={name}>{name}</li>)}</ul><div className="rd-modal-actions"><button onClick={() => { batchUpload.cancel(); setBatchConflicts(null); }}>그만두기</button><button className="danger" onClick={() => { setBatchConflicts(null); void batchUpload.confirmAll(); }}>덮어쓰기</button></div></Dialog>}
   </section>;
@@ -653,7 +724,7 @@ export function restorePersistedTabs(): { state: WorkspaceTabsState; counter: nu
 
 export function App() {
   const config = resolveConfig();
-  const rootRef = useRef<HTMLDivElement | null>(null); const [layout, setLayout] = useState<RemoteDeckLayout>('desktop');
+  const rootRef = useRef<HTMLDivElement | null>(null); const [layout, setLayout] = useState<RemoteDeckLayout>('desktop'); const [rootWidth, setRootWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 0));
   const [apiBase, setApiBase] = useState('http://localhost:4100'); const [token, setToken] = useState('');
   const client = useMemo(() => config.mode === 'same-origin' ? new RemoteDeckClient({ baseUrl: config.baseUrl, mode: 'same-origin' }) : token ? new RemoteDeckClient({ baseUrl: apiBase, token, mode: 'direct' }) : null, [apiBase, config.baseUrl, config.mode, token]);
   const [hosts, setHosts] = useState<Host[]>([]); const [credentials, setCredentials] = useState<Credential[]>([]); const [query, setQuery] = useState(''); const [showArchived, setShowArchived] = useState(false); const [catalogStatus, setCatalogStatus] = useState('호스트 불러오는 중…'); const [catalogState, setCatalogState] = useState<CatalogState>('loading');
@@ -682,7 +753,7 @@ export function App() {
   useEffect(() => {
     const root = rootRef.current;
     if (!root || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(([entry]) => setLayout(layoutForWidth(entry.contentRect.width)));
+    const observer = new ResizeObserver(([entry]) => { setLayout(layoutForWidth(entry.contentRect.width)); setRootWidth(Math.round(entry.contentRect.width)); });
     observer.observe(root); return () => observer.disconnect();
   }, []);
   useEffect(() => { if (layout === 'desktop') setDrawerOpen(false); }, [layout]);
@@ -735,7 +806,7 @@ export function App() {
     {DEV_DIRECT && <details className="rd-dev"><summary>개발 연결 설정</summary><div className="rd-dev-body"><label>API base<input aria-label="API base" value={apiBase} onChange={(event) => setApiBase(event.target.value)} /></label><label>API token<input aria-label="API token" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" /></label></div></details>}
     <main className="rd-main"><button className="rd-drawer-scrim" data-open={drawerOpen} aria-label="호스트 목록 닫기" tabIndex={drawerOpen && layout !== 'desktop' ? 0 : -1} onClick={() => { setDrawerOpen(false); drawerButtonRef.current?.focus(); }} /><aside ref={drawerRef} id="rd-host-drawer" className="rd-hosts" data-open={drawerOpen} aria-label="저장된 호스트" onKeyDown={(event) => { if (drawerOpen && layout !== 'desktop') trapTabWithin(event); }}><div className="rd-hosts-head"><strong>세션</strong><button className="primary compact" onClick={() => { setModalError(''); setModalHost(null); }}>+ 호스트</button></div><label className="rd-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="호스트 검색" placeholder="호스트 검색" value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="rd-host-status" role="status" aria-live="polite">{catalogStatus}<button className="icon" aria-label="호스트 새로고침" onClick={() => void refreshCatalog()}>↻</button></div><div className="rd-host-key-legend" title="점 표시는 접속 가능 여부가 아니라 저장된 호스트 키의 검증 상태입니다."><span className="rd-host-led trusted" aria-hidden="true" />검증됨 <span className="rd-host-led" aria-hidden="true" />미검증 <small>온라인 상태 아님</small></div>{archivedCount > 0 && <button className="rd-archive-toggle" aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>{archiveToggleLabel(archivedCount, showArchived)}</button>}<ul className="rd-host-list">{visibleHosts.map((host) => <li key={host.id} data-archived={isArchivedHost(host)} data-selected={selectedHostId === host.id}><button className="rd-host-open" aria-pressed={selectedHostId === host.id} title="눌러서 열기" onClick={() => selectHost(host)}><span className={`rd-host-led ${host.hostKeyTrusted ? 'trusted' : ''}`} role="img" aria-label={`호스트 키 ${host.hostKeyTrusted ? '검증됨' : '미검증'}`} title={`호스트 키 ${host.hostKeyTrusted ? '검증됨' : '미검증'} · 온라인 상태 표시 아님`} /><span className="rd-host-copy"><strong>{host.name}</strong><small>{host.username}@{host.hostname}:{host.port}</small></span></button><button className="icon rd-host-new-tab" aria-label={`${host.name} 새 탭 열기`} title="같은 호스트로 새 탭 열기" onClick={() => openHost(host)}>＋</button><button className="icon rd-host-edit" aria-label={`${host.name} 편집`} onClick={() => { setModalError(''); setModalHost(host); }}>✎</button></li>)}</ul></aside>
       <section className="rd-stage" aria-label="원격 작업 공간" aria-hidden={drawerOpen && layout !== 'desktop' || undefined}><div className="rd-session-tabs" role="tablist" aria-label="서버 세션"><button ref={drawerButtonRef} className="rd-drawer-toggle icon" aria-label={drawerOpen ? '호스트 목록 닫기' : '호스트 목록 열기'} aria-controls="rd-host-drawer" aria-expanded={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>☰</button>{tabs.tabs.map((tab, index) => <div className="rd-session-tab" key={tab.id} data-active={tabs.activeTabId === tab.id} data-status={tabStatus[tab.id] ?? 'idle'}><button id={`${tab.id}-tab`} role="tab" aria-controls={`${tab.id}-panel`} aria-selected={tabs.activeTabId === tab.id} tabIndex={tabs.activeTabId === tab.id ? 0 : -1} onKeyDown={(event) => tabKeyDown(event, index)} onClick={() => activateTab(tab.id)}><span className={`rd-tab-led rd-tab-led--${tabStatus[tab.id] ?? 'idle'}`} aria-hidden="true" />{tab.label}</button><button className="close" aria-label={`${tab.label} 닫기`} onClick={() => closeTab(tab.id, index)}>×</button></div>)}<span className="rd-tabs-hint">호스트를 누르면 열기 · ＋ 추가 탭</span></div>
-        <div className="rd-workspace-stack">{tabs.tabs.length === 0 && <div className="rd-welcome"><div className="rd-welcome-icon">⌘</div><h1>{welcome.title}</h1><p>{welcome.body}</p>{welcome.action && <div className="rd-welcome-actions"><button className="primary" onClick={() => setModalHost(null)}>{welcome.action}</button>{catalogState === "ready" && layout !== "desktop" && <button onClick={() => setDrawerOpen(true)}>호스트 목록 열기</button>}</div>}</div>}{client && tabs.tabs.map((tab) => { const host = hosts.find((item) => item.id === tab.hostId); return host ? <WorkspacePane key={tab.id} tab={tab} host={host} client={client} active={tabs.activeTabId === tab.id} onStatus={reportTabStatus} onSessionId={reportSessionId} fontSize={fontSize} onFontStep={stepFont} /> : null; })}</div>
+        <div className="rd-workspace-stack">{tabs.tabs.length === 0 && <div className="rd-welcome"><div className="rd-welcome-icon">⌘</div><h1>{welcome.title}</h1><p>{welcome.body}</p>{welcome.action && <div className="rd-welcome-actions"><button className="primary" onClick={() => setModalHost(null)}>{welcome.action}</button>{catalogState === "ready" && layout !== "desktop" && <button onClick={() => setDrawerOpen(true)}>호스트 목록 열기</button>}</div>}</div>}{client && tabs.tabs.map((tab) => { const host = hosts.find((item) => item.id === tab.hostId); return host ? <WorkspacePane key={tab.id} tab={tab} host={host} client={client} active={tabs.activeTabId === tab.id} onStatus={reportTabStatus} onSessionId={reportSessionId} fontSize={fontSize} onFontStep={stepFont} containerWidth={layout === 'desktop' ? Math.max(0, rootWidth - HOST_LIST_WIDTH) : rootWidth} isMobile={layout === 'mobile'} /> : null; })}</div>
       </section></main>
     {modalHost !== undefined && <HostModal key={modalHost?.id ?? 'new'} host={modalHost} credentials={credentials} busy={modalBusy} error={modalError} onCancel={() => setModalHost(undefined)} onSave={saveHost} />}
   </div>;
