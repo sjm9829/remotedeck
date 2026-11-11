@@ -28,7 +28,7 @@ export function stepFontSize(current: number, delta: number): number {
   return clampFontSize(current + delta);
 }
 
-type Prefs = { fontSize?: unknown; dock?: unknown; sidebarHidden?: unknown };
+type Prefs = { fontSize?: unknown; dock?: unknown; sidebarHidden?: unknown; collapsedFolders?: unknown };
 
 function readPrefs(): Prefs {
   try {
@@ -75,4 +75,13 @@ export function loadSidebarHidden(): boolean {
 
 export function saveSidebarHidden(hidden: boolean): void {
   writePrefs({ sidebarHidden: hidden });
+}
+
+export function loadCollapsedFolders(): string[] {
+  const { collapsedFolders } = readPrefs();
+  return Array.isArray(collapsedFolders) ? collapsedFolders.filter((name): name is string => typeof name === 'string') : [];
+}
+
+export function saveCollapsedFolders(names: readonly string[]): void {
+  writePrefs({ collapsedFolders: [...names] });
 }

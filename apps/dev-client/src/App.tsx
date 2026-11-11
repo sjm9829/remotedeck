@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type DragEvent as ReactDragEvent, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type DragEvent as ReactDragEvent, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
@@ -14,8 +14,9 @@ import { trustPendingSession, type PendingSshTrust } from './ssh-trust-flow.js';
 import { activateMostRecentHostTab, activateWorkspaceTab, addWorkspaceTab, closeWorkspaceTab, createWorkspaceTabsState, setWorkspaceTabSession, type WorkspaceTab, type WorkspaceTabsState } from './workspace-tabs.js';
 import { MAX_AUTO_ATTEMPTS, backoffMs, classifyClose, isSessionGoneError, isTerminalSessionState } from './reconnect-policy.js';
 import { createHeartbeat } from './heartbeat.js';
+import { folderNames, folderOf, groupHosts, normalizeFolderName, renameFolderTag, setFolderTag, visibleTags } from './host-folders.js';
 import { hasArchivedTag, hostLiveStates, loadRecent, needsCloseConfirm, saveRecent, setArchivedTag, sortHosts, touchRecent, type RecentMap } from './host-order.js';
-import { FONT_MAX, FONT_MIN, TERMINAL_FONT_FAMILY, TERMINAL_SCROLLBACK, defaultFontSize, loadDock, loadFontSize, loadSidebarHidden, saveDock, saveFontSize, saveSidebarHidden, stepFontSize, type SftpDock } from './terminal-prefs.js';
+import { FONT_MAX, FONT_MIN, TERMINAL_FONT_FAMILY, TERMINAL_SCROLLBACK, defaultFontSize, loadCollapsedFolders, loadDock, loadFontSize, loadSidebarHidden, saveCollapsedFolders, saveDock, saveFontSize, saveSidebarHidden, stepFontSize, type SftpDock } from './terminal-prefs.js';
 import { DEFAULT_SFTP_HEIGHT, MAX_SFTP_HEIGHT, MIN_SFTP_HEIGHT, clampSftpHeight, resizeSftpWithKey } from './split-layout.js';
 import { buildCredentialRequest, emptyCredentialDraft, type NewCredentialDraft } from './credential-draft.js';
 import { persistHost } from './host-save.js';
@@ -76,10 +77,10 @@ export function filterHosts(hosts: readonly Host[], query: string, includeArchiv
   return hosts.filter((host) => (includeArchived || !isArchivedHost(host)) && (!needle || [host.name, host.hostname, host.username, host.tags.join(' ')].some((value) => value.toLocaleLowerCase().includes(needle))));
 }
 
-type HostDraft = { name: string; hostname: string; port: string; username: string; credentialId: string; tags: string };
+type HostDraft = { name: string; hostname: string; port: string; username: string; credentialId: string; tags: string; folder: string };
 function hostDraft(host: Host | null): HostDraft {
-  return host ? { name: host.name, hostname: host.hostname, port: String(host.port), username: host.username, credentialId: host.credentialId ?? '', tags: host.tags.join(', ') }
-    : { name: '', hostname: '', port: '22', username: '', credentialId: '', tags: '' };
+  return host ? { name: host.name, hostname: host.hostname, port: String(host.port), username: host.username, credentialId: host.credentialId ?? '', tags: visibleTags(host.tags).join(', '), folder: folderOf(host) }
+    : { name: '', hostname: '', port: '22', username: '', credentialId: '', tags: '', folder: '' };
 }
 
 function useDialogFocus(onCancel: () => void) {
@@ -120,7 +121,7 @@ function Dialog({ label, onCancel, children, small = false }: { label: string; o
   return <div ref={ref} className="rd-modal" role="dialog" aria-modal="true" aria-label={label}><div className={`rd-modal-box ${small ? 'small' : ''}`}>{children}</div></div>;
 }
 
-function HostModal({ host, credentials, busy, error, onCancel, onSave }: { host: Host | null; credentials: readonly Credential[]; busy: boolean; error: string; onCancel: () => void; onSave: (draft: HostDraft, credential: NewCredentialDraft, clearSecret: () => void) => Promise<void> }) {
+function HostModal({ host, credentials, folders, busy, error, onCancel, onSave }: { host: Host | null; credentials: readonly Credential[]; folders: readonly string[]; busy: boolean; error: string; onCancel: () => void; onSave: (draft: HostDraft, credential: NewCredentialDraft, clearSecret: () => void) => Promise<void> }) {
   const [draft, setDraft] = useState(() => hostDraft(host));
   const [newCredential, setNewCredential] = useState(emptyCredentialDraft);
   const titleId = useId();
@@ -137,6 +138,7 @@ function HostModal({ host, credentials, busy, error, onCancel, onSave }: { host:
         <label>포트<input aria-label="SSH 포트" value={draft.port} onChange={field('port')} required inputMode="numeric" type="number" min="1" max="65535" /></label>
         <label>사용자 이름<input aria-label="사용자 이름" value={draft.username} onChange={field('username')} required autoCapitalize="none" /></label>
         <label className="span-2">자격 증명<select aria-label="자격 증명" value={draft.credentialId} disabled={newCredential.enabled} onChange={field('credentialId')}><option value="">지정 안 함</option>{credentials.map((credential) => <option value={credential.id} key={credential.id}>{credential.name} · {credential.type}</option>)}</select></label>
+        <label className="span-2">폴더<input aria-label="호스트 폴더" list="rd-folder-options" value={draft.folder} onChange={field('folder')} placeholder="없음 (새 이름을 입력하면 폴더가 만들어집니다)" maxLength={40} autoComplete="off" /><datalist id="rd-folder-options">{folders.map((name) => <option value={name} key={name} />)}</datalist></label>
         <label className="span-2">태그<input aria-label="호스트 태그" value={draft.tags} onChange={field('tags')} placeholder="예: homelab, storage" /></label>
         {host && <label className="rd-archive-check span-2"><input type="checkbox" checked={hasArchivedTag(draft.tags)} onChange={(event) => setDraft((current) => ({ ...current, tags: setArchivedTag(current.tags, event.target.checked) }))} />보관 — 목록에서 숨깁니다 ("보관됨 표시"로 다시 볼 수 있음)</label>}
       </div>
@@ -752,6 +754,10 @@ export function App() {
   const [recent, setRecent] = useState<RecentMap>(() => loadRecent());
   const [sidebarHidden, setSidebarHidden] = useState(() => loadSidebarHidden());
   const [closeConfirm, setCloseConfirm] = useState<{ tabId: string; label: string } | null>(null);
+  const [collapsedFolders, setCollapsedFolders] = useState<ReadonlySet<string>>(() => new Set(loadCollapsedFolders()));
+  const [dragHostId, setDragHostId] = useState<string | null>(null);
+  const [dropFolder, setDropFolder] = useState<string | null>(null);
+  const [folderRename, setFolderRename] = useState<{ from: string; value: string } | null>(null);
   const reportSessionId = useCallback((tabId: string, sessionId: string | null) => { setTabs((current) => setWorkspaceTabSession(current, tabId, sessionId)); }, []);
   const [modalHost, setModalHost] = useState<Host | null | undefined>(undefined); const [modalBusy, setModalBusy] = useState(false); const [modalError, setModalError] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false); const drawerButtonRef = useRef<HTMLButtonElement | null>(null); const drawerRef = useRef<HTMLElement | null>(null);
@@ -787,7 +793,7 @@ export function App() {
     let credentialRequest;
     try { credentialRequest = buildCredentialRequest(newCredential); } catch (error) { setModalError((error as Error).message); return; }
     setModalBusy(true); setModalError('');
-    const body = { name: draft.name.trim(), hostname: draft.hostname.trim(), port, user: draft.username.trim(), credentialId: draft.credentialId || null, tags: draft.tags.split(',').map((tag) => tag.trim()).filter(Boolean) };
+    const body = { name: draft.name.trim(), hostname: draft.hostname.trim(), port, user: draft.username.trim(), credentialId: draft.credentialId || null, tags: setFolderTag(draft.tags.split(',').map((tag) => tag.trim()).filter(Boolean), draft.folder) };
     try {
       if (credentialRequest) clearSecret();
       await persistHost(client, modalHost?.id ?? null, body, credentialRequest);
@@ -829,20 +835,70 @@ export function App() {
     event.preventDefault();
     buttons[Math.min(buttons.length - 1, Math.max(0, index + (event.key === 'ArrowDown' ? 1 : -1)))]?.focus();
   };
+  const toggleFolder = (name: string) => setCollapsedFolders((current) => { const next = new Set(current); if (next.has(name)) next.delete(name); else next.add(name); saveCollapsedFolders([...next]); return next; });
+  // Folders are `folder:<name>` tags, so moving a host is a partial update of its tags.
+  const moveHostToFolder = async (hostId: string, folder: string) => {
+    const host = hosts.find((item) => item.id === hostId);
+    setDragHostId(null); setDropFolder(null);
+    if (!host || !client || folderOf(host) === folder) return;
+    try {
+      await client.updateHost(host.id, { tags: setFolderTag(host.tags, folder) });
+      if (folder) setCollapsedFolders((current) => { if (!current.has(folder)) return current; const next = new Set(current); next.delete(folder); saveCollapsedFolders([...next]); return next; });
+      await refreshCatalog();
+      setCatalogStatus(folder ? `${host.name} → ${folder}` : `${host.name} 폴더에서 꺼냄`);
+    } catch (error) { setCatalogStatus(`이동 실패 · ${(error as Error).message}`); }
+  };
+  const submitFolderRename = async () => {
+    if (!folderRename || !client) return;
+    const from = folderRename.from; const to = normalizeFolderName(folderRename.value);
+    setFolderRename(null);
+    if (!to || to === from) return;
+    try {
+      await Promise.all(hosts.filter((host) => folderOf(host) === from).map((host) => client.updateHost(host.id, { tags: renameFolderTag(host.tags, from, to) })));
+      setCollapsedFolders((current) => { if (!current.has(from)) return current; const next = new Set(current); next.delete(from); next.add(to); saveCollapsedFolders([...next]); return next; });
+      await refreshCatalog();
+      setCatalogStatus(`폴더 이름을 "${to}"(으)로 바꿨습니다`);
+    } catch (error) { setCatalogStatus(`이름 변경 실패 · ${(error as Error).message}`); }
+  };
   const archivedCount = hosts.filter(isArchivedHost).length;
   const welcome = welcomePanel(catalogState, hosts.length - archivedCount);
   const liveByHost = hostLiveStates(tabs.tabs, tabStatus);
   const openHostIds = new Set(liveByHost.keys());
   const visibleHosts = sortHosts(filterHosts(hosts, query, showArchived), openHostIds, recent);
   const welcomeHosts = sortHosts(filterHosts(hosts, '', false), openHostIds, recent).slice(0, 8);
-  const hostTags = (host: Host) => host.tags.filter((tag) => tag.toLocaleLowerCase() !== 'archived');
+  const allFolders = folderNames(hosts);
+  const searching = query.trim() !== '';
+  const groups = groupHosts(visibleHosts);
+  const renderHostRow = (host: Host, inFolder: boolean) => {
+    const live = liveByHost.get(host.id); const liveStatus = live?.status ?? 'idle';
+    const liveLabel = liveStatus === 'connected' ? '연결됨' : liveStatus === 'connecting' ? '연결 중' : liveStatus === 'error' ? '연결 오류' : '연결 안 됨';
+    const tagText = visibleTags(host.tags).join(', ');
+    return <li key={host.id} className={inFolder ? 'rd-host-child' : undefined} data-archived={isArchivedHost(host)} data-selected={selectedHostId === host.id} data-dragging={dragHostId === host.id || undefined} draggable onDragStart={(event) => { event.dataTransfer.setData('text/x-remotedeck-host', host.id); event.dataTransfer.effectAllowed = 'move'; setDragHostId(host.id); }} onDragEnd={() => { setDragHostId(null); setDropFolder(null); }}>
+      <button className="rd-host-open" aria-pressed={selectedHostId === host.id} title={tagText ? `눌러서 열기 · 태그: ${tagText}` : '눌러서 열기'} onClick={() => selectHost(host)}><span className={`rd-host-led rd-host-led--${liveStatus}`} role="img" aria-label={`${liveLabel}${live ? ` · 탭 ${live.count}개` : ''}`} title={liveLabel} /><span className="rd-host-copy"><strong>{host.name}{live && live.count > 1 && <em className="rd-host-badge" aria-hidden="true">{live.count}</em>}{!host.hostKeyTrusted && <span className="rd-host-warn" role="img" aria-label="처음 연결할 때 호스트 키 확인이 필요합니다" title="처음 연결할 때 호스트 키 확인이 필요합니다">⚠</span>}</strong><small>{host.username}@{host.hostname}:{host.port}</small></span></button>
+      <button className="icon rd-host-new-tab" aria-label={`${host.name} 새 탭 열기`} title="같은 호스트로 새 탭 열기" onClick={() => openHost(host)}>＋</button>
+      <button className="icon rd-host-edit" aria-label={`${host.name} 편집`} onClick={() => { setModalError(''); setModalHost(host); }}>✎</button>
+    </li>;
+  };
   return <div ref={rootRef} className="rd-root" data-layout={layout} onKeyDown={(event) => { if (event.key === 'Escape' && drawerOpen) { setDrawerOpen(false); drawerButtonRef.current?.focus(); } }}>
     {DEV_DIRECT && <details className="rd-dev"><summary>개발 연결 설정</summary><div className="rd-dev-body"><label>API base<input aria-label="API base" value={apiBase} onChange={(event) => setApiBase(event.target.value)} /></label><label>API token<input aria-label="API token" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" /></label></div></details>}
-    <main className="rd-main" data-sidebar={layout === 'desktop' && sidebarHidden ? 'hidden' : 'shown'}><button className="rd-drawer-scrim" data-open={drawerOpen} aria-label="호스트 목록 닫기" tabIndex={drawerOpen && layout !== 'desktop' ? 0 : -1} onClick={() => { setDrawerOpen(false); drawerButtonRef.current?.focus(); }} /><aside ref={drawerRef} id="rd-host-drawer" className="rd-hosts" data-open={drawerOpen} aria-label="저장된 호스트" onKeyDown={(event) => { if (drawerOpen && layout !== 'desktop') trapTabWithin(event); }}><div className="rd-hosts-head"><strong>호스트</strong><button className="primary compact" onClick={() => { setModalError(''); setModalHost(null); }}>+ 호스트</button></div><label className="rd-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="호스트 검색" placeholder="호스트 검색" value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="rd-host-status" role="status" aria-live="polite">{catalogStatus}<button className="icon" aria-label="호스트 새로고침" onClick={() => void refreshCatalog()}>↻</button></div>{archivedCount > 0 && <button className="rd-archive-toggle" aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>{archiveToggleLabel(archivedCount, showArchived)}</button>}<ul className="rd-host-list" onKeyDown={hostKeyNav}>{visibleHosts.map((host) => { const live = liveByHost.get(host.id); const liveStatus = live?.status ?? 'idle'; const liveLabel = liveStatus === 'connected' ? '연결됨' : liveStatus === 'connecting' ? '연결 중' : liveStatus === 'error' ? '연결 오류' : '연결 안 됨'; return <li key={host.id} data-archived={isArchivedHost(host)} data-selected={selectedHostId === host.id}><button className="rd-host-open" aria-pressed={selectedHostId === host.id} title="눌러서 열기" onClick={() => selectHost(host)}><span className={`rd-host-led rd-host-led--${liveStatus}`} role="img" aria-label={`${liveLabel}${live ? ` · 탭 ${live.count}개` : ''}`} title={liveLabel} /><span className="rd-host-copy"><strong>{host.name}{live && live.count > 1 && <em className="rd-host-badge" aria-hidden="true">{live.count}</em>}</strong><small>{host.username}@{host.hostname}:{host.port}</small>{(hostTags(host).length > 0 || !host.hostKeyTrusted) && <span className="rd-host-tags">{!host.hostKeyTrusted && <span className="rd-chip rd-chip--warn" title="처음 연결할 때 호스트 키를 확인해야 합니다">키 확인 필요</span>}{hostTags(host).slice(0, 3).map((tag) => <span className="rd-chip" key={tag}>{tag}</span>)}</span>}</span></button><button className="icon rd-host-new-tab" aria-label={`${host.name} 새 탭 열기`} title="같은 호스트로 새 탭 열기" onClick={() => openHost(host)}>＋</button><button className="icon rd-host-edit" aria-label={`${host.name} 편집`} onClick={() => { setModalError(''); setModalHost(host); }}>✎</button></li>; })}{visibleHosts.length === 0 && catalogState === 'ready' && <li className="rd-host-empty">{query.trim() ? '검색 결과가 없습니다.' : '표시할 호스트가 없습니다.'}</li>}</ul></aside>
+    <main className="rd-main" data-sidebar={layout === 'desktop' && sidebarHidden ? 'hidden' : 'shown'}><button className="rd-drawer-scrim" data-open={drawerOpen} aria-label="호스트 목록 닫기" tabIndex={drawerOpen && layout !== 'desktop' ? 0 : -1} onClick={() => { setDrawerOpen(false); drawerButtonRef.current?.focus(); }} /><aside ref={drawerRef} id="rd-host-drawer" className="rd-hosts" data-open={drawerOpen} aria-label="저장된 호스트" onKeyDown={(event) => { if (drawerOpen && layout !== 'desktop') trapTabWithin(event); }}><div className="rd-hosts-head"><strong>호스트</strong><button className="primary compact" onClick={() => { setModalError(''); setModalHost(null); }}>+ 호스트</button></div><label className="rd-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="호스트 검색" placeholder="호스트 검색" value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="rd-host-status" role="status" aria-live="polite">{catalogStatus}<button className="icon" aria-label="호스트 새로고침" onClick={() => void refreshCatalog()}>↻</button></div>{archivedCount > 0 && <button className="rd-archive-toggle" aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>{archiveToggleLabel(archivedCount, showArchived)}</button>}<ul className="rd-host-list" data-dragging={dragHostId ? 'true' : undefined} onKeyDown={hostKeyNav} onDragOver={(event) => { if (dragHostId) event.preventDefault(); }} onDrop={(event) => { if (!dragHostId) return; event.preventDefault(); void moveHostToFolder(dragHostId, ''); }}>
+        {groups.folders.map((group) => { const isCollapsed = !searching && collapsedFolders.has(group.name); const connected = group.hosts.filter((host) => liveByHost.get(host.id)?.status === 'connected').length; return <Fragment key={`folder:${group.name}`}>
+          <li className="rd-folder" data-drop={dropFolder === group.name || undefined}>
+            <button className="rd-folder-head" aria-expanded={!isCollapsed} title={isCollapsed ? '폴더 펼치기' : '폴더 접기'} onClick={() => toggleFolder(group.name)} onDragOver={(event) => { if (!dragHostId) return; event.preventDefault(); event.stopPropagation(); setDropFolder(group.name); }} onDragLeave={() => setDropFolder((current) => current === group.name ? null : current)} onDrop={(event) => { if (!dragHostId) return; event.preventDefault(); event.stopPropagation(); void moveHostToFolder(dragHostId, group.name); }}>
+              <span className="rd-folder-chevron" data-open={!isCollapsed} aria-hidden="true">▸</span><IconFolder size={15} /><strong>{group.name}</strong><span className="rd-folder-count">{group.hosts.length}</span>{connected > 0 && <span className="rd-host-led rd-host-led--connected" role="img" aria-label={`연결됨 ${connected}개`} />}
+            </button>
+            <button className="icon rd-folder-edit" aria-label={`${group.name} 폴더 이름 변경`} title="폴더 이름 변경" onClick={() => setFolderRename({ from: group.name, value: group.name })}>✎</button>
+          </li>
+          {!isCollapsed && group.hosts.map((host) => renderHostRow(host, true))}
+        </Fragment>; })}
+        {groups.loose.map((host) => renderHostRow(host, false))}
+        {dragHostId && (() => { const dragged = hosts.find((host) => host.id === dragHostId); return dragged && folderOf(dragged) ? <li className="rd-drop-hint">여기에 놓으면 폴더에서 꺼냅니다</li> : null; })()}
+        {visibleHosts.length === 0 && catalogState === 'ready' && <li className="rd-host-empty">{searching ? '검색 결과가 없습니다.' : '표시할 호스트가 없습니다.'}</li>}</ul></aside>
       <section className="rd-stage" aria-label="원격 작업 공간" aria-hidden={drawerOpen && layout !== 'desktop' || undefined}><div className="rd-session-tabs" role="tablist" aria-label="서버 세션"><button ref={drawerButtonRef} className="rd-drawer-toggle icon" aria-label={(layout === 'desktop' ? !sidebarHidden : drawerOpen) ? '호스트 목록 닫기' : '호스트 목록 열기'} aria-controls="rd-host-drawer" aria-expanded={layout === 'desktop' ? !sidebarHidden : drawerOpen} onClick={toggleSidebar}>☰</button>{tabs.tabs.map((tab, index) => <div className="rd-session-tab" key={tab.id} data-active={tabs.activeTabId === tab.id} data-status={tabStatus[tab.id] ?? 'idle'} onAuxClick={(event) => { if (event.button === 1) { event.preventDefault(); requestCloseTab(tab.id); } }}><button id={`${tab.id}-tab`} role="tab" aria-controls={`${tab.id}-panel`} aria-selected={tabs.activeTabId === tab.id} tabIndex={tabs.activeTabId === tab.id ? 0 : -1} onKeyDown={(event) => tabKeyDown(event, index)} onClick={() => activateTab(tab.id)}><span className={`rd-tab-led rd-tab-led--${tabStatus[tab.id] ?? 'idle'}`} aria-hidden="true" />{tab.label}</button><button className="close" aria-label={`${tab.label} 닫기`} onClick={() => requestCloseTab(tab.id)}>×</button></div>)}<span className="rd-tabs-hint">호스트를 누르면 열기 · ＋ 추가 탭</span></div>
         <div className="rd-workspace-stack">{tabs.tabs.length === 0 && <div className="rd-welcome"><div className="rd-welcome-icon">⌘</div><h1>{welcome.title}</h1><p>{welcome.body}</p>{catalogState === 'ready' && welcomeHosts.length > 0 && <ul className="rd-welcome-hosts" aria-label="호스트 바로 열기">{welcomeHosts.map((host) => <li key={host.id}><button className="rd-host-card" onClick={() => openHost(host)}><span className="rd-host-led rd-host-led--idle" aria-hidden="true" /><span className="rd-host-card-copy"><strong>{host.name}</strong><small>{host.username}@{host.hostname}:{host.port}</small></span></button></li>)}</ul>}<div className="rd-welcome-actions">{welcome.action && <button className={welcomeHosts.length > 0 ? '' : 'primary'} onClick={() => setModalHost(null)}>{welcome.action}</button>}{catalogState === 'error' && <button className="primary" onClick={() => void refreshCatalog()}>다시 시도</button>}</div></div>}{client && tabs.tabs.map((tab) => { const host = hosts.find((item) => item.id === tab.hostId); return host ? <WorkspacePane key={tab.id} tab={tab} host={host} client={client} active={tabs.activeTabId === tab.id} onStatus={reportTabStatus} onSessionId={reportSessionId} fontSize={fontSize} onFontStep={stepFont} containerWidth={layout === 'desktop' ? Math.max(0, rootWidth - (sidebarHidden ? 0 : HOST_LIST_WIDTH)) : rootWidth} isMobile={layout === 'mobile'} /> : null; })}</div>
       </section></main>
+    {folderRename && <Dialog small label="폴더 이름 변경" onCancel={() => setFolderRename(null)}><form onSubmit={(event) => { event.preventDefault(); void submitFolderRename(); }}><label>폴더 이름<input aria-label="폴더 이름" value={folderRename.value} maxLength={40} onChange={(event) => setFolderRename((current) => current ? { ...current, value: event.target.value } : current)} /></label><p className="rd-form-note">같은 이름의 폴더가 이미 있으면 하나로 합쳐집니다.</p><div className="rd-modal-actions"><button type="button" onClick={() => setFolderRename(null)}>취소</button><button className="primary" type="submit" disabled={!normalizeFolderName(folderRename.value)}>변경</button></div></form></Dialog>}
     {closeConfirm && <Dialog small label="세션 종료 확인" onCancel={() => setCloseConfirm(null)}><p><strong>{closeConfirm.label}</strong> 탭을 닫으면 연결된 SSH 세션이 종료되고, 실행 중인 작업도 함께 끝납니다.</p><div className="rd-modal-actions"><button onClick={() => setCloseConfirm(null)}>취소</button><button className="danger" onClick={() => { const index = tabs.tabs.findIndex((item) => item.id === closeConfirm.tabId); setCloseConfirm(null); if (index >= 0) closeTab(closeConfirm.tabId, index); }}>세션 종료</button></div></Dialog>}
-    {modalHost !== undefined && <HostModal key={modalHost?.id ?? 'new'} host={modalHost} credentials={credentials} busy={modalBusy} error={modalError} onCancel={() => setModalHost(undefined)} onSave={saveHost} />}
+    {modalHost !== undefined && <HostModal key={modalHost?.id ?? 'new'} host={modalHost} credentials={credentials} folders={allFolders} busy={modalBusy} error={modalError} onCancel={() => setModalHost(undefined)} onSave={saveHost} />}
   </div>;
 }

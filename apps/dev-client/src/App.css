@@ -377,3 +377,30 @@ textarea { min-height: 112px; padding-block: 8px; resize: vertical; font-family:
 }
 .rd-host-open { align-items: flex-start; padding-top: 9px; padding-bottom: 8px; }
 .rd-host-open .rd-host-led { margin-top: 4px; }
+
+/* ---- Compact host rows and folders ---- */
+.rd-host-open { align-items: center; min-height: 42px; padding: 4px 7px; }
+.rd-host-open .rd-host-led { margin-top: 0; }
+.rd-host-copy small { margin-top: 1px; }
+.rd-host-warn { margin-left: 6px; color: var(--rd-warn); font-size: 11px; font-weight: 400; cursor: help; }
+.rd-host-list li[data-dragging] { opacity: .45; }
+.rd-host-list li.rd-folder { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; margin-top: 2px; }
+.rd-folder-head { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 34px; padding: 0 7px; border: 0; background: transparent; color: #b6c3d4; text-align: left; }
+.rd-folder-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+.rd-folder-head:hover { background: transparent; color: var(--rd-fg); }
+.rd-folder-chevron { display: inline-block; width: 10px; color: #7b8aa0; font-size: 10px; transition: transform 120ms; }
+.rd-folder-chevron[data-open="true"] { transform: rotate(90deg); }
+.rd-folder-count { margin-left: auto; padding: 0 6px; border-radius: 999px; background: #1b2634; color: #8fa0b6; font-size: 10px; }
+.rd-folder-edit { visibility: hidden; }
+.rd-host-list li.rd-folder:hover .rd-folder-edit, .rd-folder-edit:focus-visible { visibility: visible; }
+.rd-host-list li.rd-folder[data-drop] { background: #16304a; box-shadow: inset 0 0 0 1px var(--rd-accent); }
+.rd-host-list li.rd-host-child { margin-left: 12px; border-left: 1px solid #243246; border-radius: 0 5px 5px 0; }
+.rd-host-list li.rd-drop-hint { display: block; margin: 6px 4px 0; padding: 8px; border: 1px dashed #3b4a5e; border-radius: 6px; color: var(--rd-muted); font-size: 11px; text-align: center; }
+.rd-host-list[data-dragging="true"] { outline: 1px dashed transparent; }
+@media (pointer: coarse) {
+  .rd-host-open { min-height: 48px; }
+  .rd-folder-edit { visibility: visible; }
+  .rd-folder-head { min-height: 42px; }
+}
+/* The list fills the sidebar so a host can be dropped anywhere below it to leave its folder. */
+.rd-host-list { flex: 1 1 auto; min-height: 0; }

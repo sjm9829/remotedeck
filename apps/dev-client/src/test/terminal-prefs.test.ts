@@ -68,3 +68,16 @@ describe('sidebar preference', () => {
     expect(loadSidebarHidden()).toBe(false);
   });
 });
+
+import { loadCollapsedFolders, saveCollapsedFolders } from '../terminal-prefs.js';
+describe('collapsed folders preference', () => {
+  it('round-trips names and ignores junk', () => {
+    expect(loadCollapsedFolders()).toEqual([]);
+    saveCollapsedFolders(['Homelab', 'Lab']);
+    expect(loadCollapsedFolders()).toEqual(['Homelab', 'Lab']);
+    store.set('remotedeck:prefs:v1', '{"collapsedFolders":["ok",5,null]}');
+    expect(loadCollapsedFolders()).toEqual(['ok']);
+    store.set('remotedeck:prefs:v1', '{"collapsedFolders":"nope"}');
+    expect(loadCollapsedFolders()).toEqual([]);
+  });
+});
