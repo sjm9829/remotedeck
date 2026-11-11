@@ -28,7 +28,7 @@ export function stepFontSize(current: number, delta: number): number {
   return clampFontSize(current + delta);
 }
 
-type Prefs = { fontSize?: unknown; dock?: unknown };
+type Prefs = { fontSize?: unknown; dock?: unknown; sidebarHidden?: unknown };
 
 function readPrefs(): Prefs {
   try {
@@ -67,4 +67,12 @@ export function loadDock(): SftpDock | null {
 
 export function saveDock(dock: SftpDock): void {
   writePrefs({ dock });
+}
+
+export function loadSidebarHidden(): boolean {
+  return readPrefs().sidebarHidden === true;
+}
+
+export function saveSidebarHidden(hidden: boolean): void {
+  writePrefs({ sidebarHidden: hidden });
 }

@@ -79,9 +79,12 @@ describe('App — same-origin (production) UI contract', () => {
     expect(html).toContain('aria-label="호스트 새로고침"');
     expect(html).toContain('aria-live="polite"');
     expect(html).toContain('aria-controls="rd-host-drawer"');
-    expect(html).toContain('aria-expanded="false"');
-    expect(html).toContain('온라인 상태 아님');
-    expect(html).toContain('접속 가능 여부가 아니라 저장된 호스트 키의 검증 상태');
+    // Desktop: the host list is open, so its toggle reports expanded and offers to close it.
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('data-sidebar="shown"');
+    // The misleading "not an online indicator" legend is gone; LEDs now report live connections.
+    expect(html).not.toContain('온라인 상태 아님');
+    expect(html).not.toContain('rd-host-key-legend');
   });
 
   it('renders terminal and SFTP together and keeps an inactive workspace mounted', async () => {

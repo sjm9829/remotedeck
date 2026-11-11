@@ -55,3 +55,16 @@ describe('dock preference', () => {
     expect(loadDock()).toBeNull();
   });
 });
+
+import { loadSidebarHidden, saveSidebarHidden } from '../terminal-prefs.js';
+describe('sidebar preference', () => {
+  it('defaults visible, persists, and keeps other prefs', () => {
+    expect(loadSidebarHidden()).toBe(false);
+    saveFontSize(16);
+    saveSidebarHidden(true);
+    expect(loadSidebarHidden()).toBe(true);
+    expect(loadFontSize()).toBe(16);
+    saveSidebarHidden(false);
+    expect(loadSidebarHidden()).toBe(false);
+  });
+});

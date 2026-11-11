@@ -14,7 +14,8 @@ import { trustPendingSession, type PendingSshTrust } from './ssh-trust-flow.js';
 import { activateMostRecentHostTab, activateWorkspaceTab, addWorkspaceTab, closeWorkspaceTab, createWorkspaceTabsState, setWorkspaceTabSession, type WorkspaceTab, type WorkspaceTabsState } from './workspace-tabs.js';
 import { MAX_AUTO_ATTEMPTS, backoffMs, classifyClose, isSessionGoneError, isTerminalSessionState } from './reconnect-policy.js';
 import { createHeartbeat } from './heartbeat.js';
-import { FONT_MAX, FONT_MIN, TERMINAL_FONT_FAMILY, TERMINAL_SCROLLBACK, defaultFontSize, loadDock, loadFontSize, saveDock, saveFontSize, stepFontSize, type SftpDock } from './terminal-prefs.js';
+import { hasArchivedTag, hostLiveStates, loadRecent, needsCloseConfirm, saveRecent, setArchivedTag, sortHosts, touchRecent, type RecentMap } from './host-order.js';
+import { FONT_MAX, FONT_MIN, TERMINAL_FONT_FAMILY, TERMINAL_SCROLLBACK, defaultFontSize, loadDock, loadFontSize, loadSidebarHidden, saveDock, saveFontSize, saveSidebarHidden, stepFontSize, type SftpDock } from './terminal-prefs.js';
 import { DEFAULT_SFTP_HEIGHT, MAX_SFTP_HEIGHT, MIN_SFTP_HEIGHT, clampSftpHeight, resizeSftpWithKey } from './split-layout.js';
 import { buildCredentialRequest, emptyCredentialDraft, type NewCredentialDraft } from './credential-draft.js';
 import { persistHost } from './host-save.js';
@@ -65,7 +66,7 @@ export type WelcomePanel = { title: string; body: string; action?: string };
  *  offers so a returning user is never asked to add their first host again. */
 export function welcomePanel(state: CatalogState, hostCount: number): WelcomePanel {
   if (state === 'loading') return { title: '호스트 목록을 불러오는 중입니다', body: '잠시만 기다려 주세요.' };
-  if (state === 'error') return { title: '호스트 목록을 불러오지 못했습니다', body: '왼쪽 위 상태 문구를 확인한 뒤 새로고침 버튼으로 다시 시도해 주세요.' };
+  if (state === 'error') return { title: '호스트 목록을 불러오지 못했습니다', body: '네트워크나 로그인 상태를 확인한 뒤 다시 시도해 주세요.' };
   if (hostCount === 0) return { title: '원격 서버를 한 화면에서 관리하세요', body: '호스트를 추가하면 SSH 터미널과 SFTP 파일 창을 한 번에 열 수 있습니다.', action: '첫 호스트 추가' };
   return { title: `${hostCount}개의 호스트가 준비되어 있습니다`, body: '목록에서 호스트를 누르면 SSH · SFTP 탭이 열립니다. ＋로 같은 호스트의 탭을 더 열 수 있습니다.', action: '호스트 추가' };
 }
@@ -137,6 +138,7 @@ function HostModal({ host, credentials, busy, error, onCancel, onSave }: { host:
         <label>사용자 이름<input aria-label="사용자 이름" value={draft.username} onChange={field('username')} required autoCapitalize="none" /></label>
         <label className="span-2">자격 증명<select aria-label="자격 증명" value={draft.credentialId} disabled={newCredential.enabled} onChange={field('credentialId')}><option value="">지정 안 함</option>{credentials.map((credential) => <option value={credential.id} key={credential.id}>{credential.name} · {credential.type}</option>)}</select></label>
         <label className="span-2">태그<input aria-label="호스트 태그" value={draft.tags} onChange={field('tags')} placeholder="예: homelab, storage" /></label>
+        {host && <label className="rd-archive-check span-2"><input type="checkbox" checked={hasArchivedTag(draft.tags)} onChange={(event) => setDraft((current) => ({ ...current, tags: setArchivedTag(current.tags, event.target.checked) }))} />보관 — 목록에서 숨깁니다 ("보관됨 표시"로 다시 볼 수 있음)</label>}
       </div>
       <label className="rd-new-credential-toggle"><input type="checkbox" checked={newCredential.enabled} onChange={(event) => setNewCredential((current) => ({ ...current, enabled: event.target.checked, secret: '' }))} />새 자격 증명을 만들어 이 호스트에 연결</label>
       {newCredential.enabled && <fieldset className="rd-credential-fields"><legend>새 자격 증명</legend>
@@ -177,6 +179,12 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   const sessionIdRef = useRef(tab.sessionId ?? '');
   const closedSshSessionIdsRef = useRef(new Set<string>());
   const mountedRef = useRef(true);
+  // Short non-blocking confirmations (upload done, copied, reconnected …).
+  const [toast, setToast] = useState('');
+  const toastTimerRef = useRef<number | null>(null);
+  const notifyRef = useRef<(message: string) => void>(() => undefined);
+  notifyRef.current = (message: string) => { if (!mountedRef.current) return; setToast(message); if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current); toastTimerRef.current = window.setTimeout(() => { toastTimerRef.current = null; setToast(''); }, 2600); };
+  useEffect(() => () => { if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current); }, []);
   // Reconnect machinery: a restored tab re-attaches to the id saved before reload;
   // a dropped socket is retried with backoff against the same server session.
   const restoreIdRef = useRef(tab.sessionId ?? '');
@@ -281,7 +289,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     const id = sftpIdRef.current; if (!id) return;
     const { side, dir } = uploadTarget.current;
     setSftpBusy(true); setSftpError(''); setSftpStatus(`업로드 중 · ${file.name}`);
-    try { await client.sftpUpload(id, joinSftpPath(dir, file.name), file, overwrite); await loadSide(side, id, dir); }
+    try { await client.sftpUpload(id, joinSftpPath(dir, file.name), file, overwrite); await loadSide(side, id, dir); notifyRef.current(`업로드 완료 · ${file.name}`); }
     catch (error) { setSftpError((error as Error).message); } finally { setSftpBusy(false); }
   }), [client, loadSide]);
   const batchUpload = useMemo(() => createBatchUploadFlow<File>(
@@ -289,8 +297,8 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     async (file, overwrite) => {
       const id = sftpIdRef.current; if (!id) return;
       const { side, dir } = uploadTarget.current;
-      setSftpBusy(true); setSftpError(''); setSftpStatus(`업로드 중 뜰 ${file.name}`);
-      try { await client.sftpUpload(id, joinSftpPath(dir, file.name), file, overwrite); await loadSide(side, id, dir); }
+      setSftpBusy(true); setSftpError(''); setSftpStatus(`업로드 중 · ${file.name}`);
+      try { await client.sftpUpload(id, joinSftpPath(dir, file.name), file, overwrite); await loadSide(side, id, dir); notifyRef.current(`업로드 완료 · ${file.name}`); }
       catch (error) { setSftpError((error as Error).message); } finally { setSftpBusy(false); }
     },
   ), [client, loadSide]);
@@ -306,7 +314,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     terminal.attachCustomKeyEventHandler((event) => {
       // Ctrl/Cmd+C with a selection copies it (like Windows Terminal) instead of sending ^C.
       if (event.type === 'keydown' && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'c' && terminal.hasSelection()) {
-        void navigator.clipboard?.writeText(terminal.getSelection()).catch(() => undefined);
+        void navigator.clipboard?.writeText(terminal.getSelection()).then(() => notifyRef.current('복사했습니다')).catch(() => undefined);
         terminal.clearSelection();
         return false;
       }
@@ -360,7 +368,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     const socket = client.connectSession(id, ticket.ticket);
     if (!mountedRef.current) { try { socket.close(); } catch { /* already closed */ } return; }
     adoptSocket(wsRef, socket);
-    socket.onopen = () => { attemptRef.current = 0; autoRecreateRef.current = false; heartbeat.start(); setSshState('attached'); setSshStatus('SSH 연결됨'); termRef.current?.reset(); termRef.current?.writeln(`[${hostNameRef.current} 연결됨]`); ctrlRef.current?.fitNow(); };
+    socket.onopen = () => { const wasReconnect = attemptRef.current > 0; if (wasReconnect) notifyRef.current('다시 연결되었습니다'); attemptRef.current = 0; autoRecreateRef.current = false; heartbeat.start(); setSshState('attached'); setSshStatus('SSH 연결됨'); termRef.current?.reset(); termRef.current?.writeln(`[${hostNameRef.current} 연결됨]`); ctrlRef.current?.fitNow(); };
     socket.onmessage = (event) => {
       heartbeat.touch();
       try {
@@ -459,8 +467,8 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   const approveSftpTrust = async () => { if (!sftpTrust) return; setSftpBusy(true); setSftpError(''); try { await client.trustSftpSession(sftpTrust.id); sftpIdRef.current = sftpTrust.id; if (!mountedRef.current) { closeRemoteSessionOnce(sftpTrust.id, closedSftpSessionIdsRef.current, (id) => client.closeSftpSession(id)); return; } setSftpId(sftpTrust.id); setSftpTrust(null); await loadFiles(sftpTrust.id, ''); } catch (error) { if (mountedRef.current) setSftpError((error as Error).message); } finally { if (mountedRef.current) setSftpBusy(false); } };
   const runSftp = async (action: () => Promise<void>) => { setSftpBusy(true); setSftpError(''); try { await action(); } catch (error) { setSftpError((error as Error).message); } finally { setSftpBusy(false); } };
   const navigate = (side: PaneSide, path: string) => { if (sftpId) void runSftp(() => loadSide(side, sftpId, path)); };
-  const runPrompt = async () => { if (!prompt || !sftpId || !promptValue.trim()) return; const value = promptValue.trim(); const side = prompt.side; const dir = pathRefOf(side).current; await runSftp(async () => { if (prompt.mode === 'mkdir') await client.sftpMkdir(sftpId, joinSftpPath(dir, value)); else await client.sftpRename(sftpId, joinSftpPath(dir, prompt.from), joinSftpPath(dir, value)); await loadSide(side, sftpId, dir); }); setPrompt(null); };
-  const confirmDelete = async () => { if (!confirm || !sftpId) return; const side = confirm.side; const dir = pathRefOf(side).current; await runSftp(async () => { const path = joinSftpPath(dir, confirm.name); if (confirm.kind === 'dir') await client.sftpDeleteDir(sftpId, path); else await client.sftpDeleteFile(sftpId, path); await loadSide(side, sftpId, dir); }); setConfirm(null); };
+  const runPrompt = async () => { if (!prompt || !sftpId || !promptValue.trim()) return; const value = promptValue.trim(); const side = prompt.side; const dir = pathRefOf(side).current; await runSftp(async () => { if (prompt.mode === 'mkdir') await client.sftpMkdir(sftpId, joinSftpPath(dir, value)); else await client.sftpRename(sftpId, joinSftpPath(dir, prompt.from), joinSftpPath(dir, value)); await loadSide(side, sftpId, dir); notifyRef.current(prompt.mode === 'mkdir' ? '폴더를 만들었습니다' : '이름을 변경했습니다'); }); setPrompt(null); };
+  const confirmDelete = async () => { if (!confirm || !sftpId) return; const side = confirm.side; const dir = pathRefOf(side).current; await runSftp(async () => { const path = joinSftpPath(dir, confirm.name); if (confirm.kind === 'dir') await client.sftpDeleteDir(sftpId, path); else await client.sftpDeleteFile(sftpId, path); await loadSide(side, sftpId, dir); notifyRef.current('삭제했습니다'); }); setConfirm(null); };
   const selectUpload = async (event: ChangeEvent<HTMLInputElement>, side: PaneSide) => { const file = event.target.files?.[0]; event.target.value = ''; if (!file || !sftpId) return; const dir = pathRefOf(side).current; uploadTarget.current = { side, dir }; const result = await uploadFlow.select(filesRefOf(side).current.map((entry) => entry.name), file); if (result.overwrite) setOverwriteName(file.name); };
   const download = async (name: string, side: PaneSide) => {
     if (!sftpId) return; const dir = pathRefOf(side).current;
@@ -526,7 +534,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
       }
       await loadSide(side, sftpId, dir);
     });
-    const summary = summarizeBulkDelete(outcome); if (summary) setSftpError(summary);
+    const summary = summarizeBulkDelete(outcome); if (summary) setSftpError(summary); else if (outcome.deleted.length) notifyRef.current(`${outcome.deleted.length}개 삭제했습니다`);
     setSelOf(side)(clearSelection());
     setBulkDelete(null);
   };
@@ -701,6 +709,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     {overwriteName && <Dialog small label="덮어쓰기 확인" onCancel={() => { uploadFlow.cancel(); setOverwriteName(null); }}><p><strong>{overwriteName}</strong> 파일을 덮어쓸까요?</p><div className="rd-modal-actions"><button onClick={() => { uploadFlow.cancel(); setOverwriteName(null); }}>취소</button><button className="danger" onClick={() => { setOverwriteName(null); void uploadFlow.confirm(); }}>덮어쓰기</button></div></Dialog>}
     {contextMenu && (() => { const target = entryOf(contextMenu.side, contextMenu.name); if (!target) return null; const sel = selOf(contextMenu.side); const items = contextMenuItems({ entry: { name: target.name, type: target.type }, selectionCount: Math.max(1, sel.selected.size), dual }); return <div className="rd-context-menu" role="menu" style={{ left: Math.max(8, Math.min(contextMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 184)), top: Math.max(8, Math.min(contextMenu.y, (typeof window !== 'undefined' ? window.innerHeight : 800) - 8 - items.length * 32)) }}>{items.map((item) => <button role="menuitem" key={item.id} className={item.danger ? 'danger' : ''} onClick={() => runContextAction(item.id)}>{item.label}</button>)}</div>; })()}
     {bulkDelete && <Dialog small label="삭제 확인" onCancel={() => setBulkDelete(null)}><p><strong>{bulkDelete.items.length}개</strong> 항목을 삭제할까요? {bulkDelete.items.some((item) => item.kind === 'dir') && '빈 폴더는 비어 있어야 삭제할 수 있습니다.'}</p><div className="rd-modal-actions"><button onClick={() => setBulkDelete(null)}>취소</button><button className="danger" onClick={() => void confirmBulkDelete()}>삭제</button></div></Dialog>}
+    {toast && <div className="rd-toast" role="status" aria-live="polite">{toast}</div>}
     {batchConflicts && <Dialog small label="덮어쓰기 확인" onCancel={() => { batchUpload.cancel(); setBatchConflicts(null); }}><p>이미 존재하는 파일 <strong>{batchConflicts.length}개</strong>를 덮어쓸까요?</p><ul className="rd-conflict-list">{batchConflicts.map((name) => <li key={name}>{name}</li>)}</ul><div className="rd-modal-actions"><button onClick={() => { batchUpload.cancel(); setBatchConflicts(null); }}>그만두기</button><button className="danger" onClick={() => { setBatchConflicts(null); void batchUpload.confirmAll(); }}>덮어쓰기</button></div></Dialog>}
   </section>;
 }
@@ -740,6 +749,9 @@ export function App() {
   }, []);
   const [fontSize, setFontSize] = useState(() => loadFontSize() ?? defaultFontSize(typeof window !== 'undefined' && window.innerWidth < 600 ? 'mobile' : 'desktop'));
   const stepFont = useCallback((delta: number) => { setFontSize((current) => { const next = stepFontSize(current, delta); saveFontSize(next); return next; }); }, []);
+  const [recent, setRecent] = useState<RecentMap>(() => loadRecent());
+  const [sidebarHidden, setSidebarHidden] = useState(() => loadSidebarHidden());
+  const [closeConfirm, setCloseConfirm] = useState<{ tabId: string; label: string } | null>(null);
   const reportSessionId = useCallback((tabId: string, sessionId: string | null) => { setTabs((current) => setWorkspaceTabSession(current, tabId, sessionId)); }, []);
   const [modalHost, setModalHost] = useState<Host | null | undefined>(undefined); const [modalBusy, setModalBusy] = useState(false); const [modalError, setModalError] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false); const drawerButtonRef = useRef<HTMLButtonElement | null>(null); const drawerRef = useRef<HTMLElement | null>(null);
@@ -758,7 +770,7 @@ export function App() {
   }, []);
   useEffect(() => { if (layout === 'desktop') setDrawerOpen(false); }, [layout]);
   useEffect(() => { if (drawerOpen) drawerRef.current?.querySelector<HTMLInputElement>('input[type="search"]')?.focus({ preventScroll: true }); }, [drawerOpen]);
-  const openHost = (host: Host) => { setSelectedHostId(host.id); const ordinal = (hostOrdinals.current.get(host.id) ?? 0) + 1; hostOrdinals.current.set(host.id, ordinal); tabCounter.current += 1; setTabs((current) => addWorkspaceTab(current, { id: `workspace-${tabCounter.current}`, hostId: host.id, label: `${host.name} · ${ordinal}` })); setDrawerOpen(false); drawerButtonRef.current?.focus(); };
+  const openHost = (host: Host) => { setRecent((current) => { const next = touchRecent(current, host.id, Date.now()); saveRecent(next); return next; }); setSelectedHostId(host.id); const ordinal = (hostOrdinals.current.get(host.id) ?? 0) + 1; hostOrdinals.current.set(host.id, ordinal); tabCounter.current += 1; setTabs((current) => addWorkspaceTab(current, { id: `workspace-${tabCounter.current}`, hostId: host.id, label: `${host.name} · ${ordinal}` })); setDrawerOpen(false); drawerButtonRef.current?.focus(); };
   // One tap opens the host: an existing tab is re-activated, otherwise a new one opens.
   // The ＋ button opens an additional tab for the same host.
   const selectHost = (host: Host) => {
@@ -799,15 +811,38 @@ export function App() {
     setTabStatus((current) => { if (!(tabId in current)) return current; const next = { ...current }; delete next[tabId]; return next; });
     if (fallback) requestAnimationFrame(() => document.getElementById(`${fallback.id}-tab`)?.focus());
   };
+  const requestCloseTab = (tabId: string) => {
+    const tab = tabs.tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    if (needsCloseConfirm(tabStatus[tabId])) setCloseConfirm({ tabId, label: tab.label });
+    else closeTab(tabId, tabs.tabs.indexOf(tab));
+  };
+  const toggleSidebar = () => {
+    if (layout === 'desktop') { const next = !sidebarHidden; setSidebarHidden(next); saveSidebarHidden(next); }
+    else setDrawerOpen((value) => !value);
+  };
+  const hostKeyNav = (event: KeyboardEvent<HTMLUListElement>) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('.rd-host-open')];
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (index === -1) return;
+    event.preventDefault();
+    buttons[Math.min(buttons.length - 1, Math.max(0, index + (event.key === 'ArrowDown' ? 1 : -1)))]?.focus();
+  };
   const archivedCount = hosts.filter(isArchivedHost).length;
   const welcome = welcomePanel(catalogState, hosts.length - archivedCount);
-  const visibleHosts = filterHosts(hosts, query, showArchived);
+  const liveByHost = hostLiveStates(tabs.tabs, tabStatus);
+  const openHostIds = new Set(liveByHost.keys());
+  const visibleHosts = sortHosts(filterHosts(hosts, query, showArchived), openHostIds, recent);
+  const welcomeHosts = sortHosts(filterHosts(hosts, '', false), openHostIds, recent).slice(0, 8);
+  const hostTags = (host: Host) => host.tags.filter((tag) => tag.toLocaleLowerCase() !== 'archived');
   return <div ref={rootRef} className="rd-root" data-layout={layout} onKeyDown={(event) => { if (event.key === 'Escape' && drawerOpen) { setDrawerOpen(false); drawerButtonRef.current?.focus(); } }}>
     {DEV_DIRECT && <details className="rd-dev"><summary>개발 연결 설정</summary><div className="rd-dev-body"><label>API base<input aria-label="API base" value={apiBase} onChange={(event) => setApiBase(event.target.value)} /></label><label>API token<input aria-label="API token" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" /></label></div></details>}
-    <main className="rd-main"><button className="rd-drawer-scrim" data-open={drawerOpen} aria-label="호스트 목록 닫기" tabIndex={drawerOpen && layout !== 'desktop' ? 0 : -1} onClick={() => { setDrawerOpen(false); drawerButtonRef.current?.focus(); }} /><aside ref={drawerRef} id="rd-host-drawer" className="rd-hosts" data-open={drawerOpen} aria-label="저장된 호스트" onKeyDown={(event) => { if (drawerOpen && layout !== 'desktop') trapTabWithin(event); }}><div className="rd-hosts-head"><strong>세션</strong><button className="primary compact" onClick={() => { setModalError(''); setModalHost(null); }}>+ 호스트</button></div><label className="rd-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="호스트 검색" placeholder="호스트 검색" value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="rd-host-status" role="status" aria-live="polite">{catalogStatus}<button className="icon" aria-label="호스트 새로고침" onClick={() => void refreshCatalog()}>↻</button></div><div className="rd-host-key-legend" title="점 표시는 접속 가능 여부가 아니라 저장된 호스트 키의 검증 상태입니다."><span className="rd-host-led trusted" aria-hidden="true" />검증됨 <span className="rd-host-led" aria-hidden="true" />미검증 <small>온라인 상태 아님</small></div>{archivedCount > 0 && <button className="rd-archive-toggle" aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>{archiveToggleLabel(archivedCount, showArchived)}</button>}<ul className="rd-host-list">{visibleHosts.map((host) => <li key={host.id} data-archived={isArchivedHost(host)} data-selected={selectedHostId === host.id}><button className="rd-host-open" aria-pressed={selectedHostId === host.id} title="눌러서 열기" onClick={() => selectHost(host)}><span className={`rd-host-led ${host.hostKeyTrusted ? 'trusted' : ''}`} role="img" aria-label={`호스트 키 ${host.hostKeyTrusted ? '검증됨' : '미검증'}`} title={`호스트 키 ${host.hostKeyTrusted ? '검증됨' : '미검증'} · 온라인 상태 표시 아님`} /><span className="rd-host-copy"><strong>{host.name}</strong><small>{host.username}@{host.hostname}:{host.port}</small></span></button><button className="icon rd-host-new-tab" aria-label={`${host.name} 새 탭 열기`} title="같은 호스트로 새 탭 열기" onClick={() => openHost(host)}>＋</button><button className="icon rd-host-edit" aria-label={`${host.name} 편집`} onClick={() => { setModalError(''); setModalHost(host); }}>✎</button></li>)}</ul></aside>
-      <section className="rd-stage" aria-label="원격 작업 공간" aria-hidden={drawerOpen && layout !== 'desktop' || undefined}><div className="rd-session-tabs" role="tablist" aria-label="서버 세션"><button ref={drawerButtonRef} className="rd-drawer-toggle icon" aria-label={drawerOpen ? '호스트 목록 닫기' : '호스트 목록 열기'} aria-controls="rd-host-drawer" aria-expanded={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>☰</button>{tabs.tabs.map((tab, index) => <div className="rd-session-tab" key={tab.id} data-active={tabs.activeTabId === tab.id} data-status={tabStatus[tab.id] ?? 'idle'}><button id={`${tab.id}-tab`} role="tab" aria-controls={`${tab.id}-panel`} aria-selected={tabs.activeTabId === tab.id} tabIndex={tabs.activeTabId === tab.id ? 0 : -1} onKeyDown={(event) => tabKeyDown(event, index)} onClick={() => activateTab(tab.id)}><span className={`rd-tab-led rd-tab-led--${tabStatus[tab.id] ?? 'idle'}`} aria-hidden="true" />{tab.label}</button><button className="close" aria-label={`${tab.label} 닫기`} onClick={() => closeTab(tab.id, index)}>×</button></div>)}<span className="rd-tabs-hint">호스트를 누르면 열기 · ＋ 추가 탭</span></div>
-        <div className="rd-workspace-stack">{tabs.tabs.length === 0 && <div className="rd-welcome"><div className="rd-welcome-icon">⌘</div><h1>{welcome.title}</h1><p>{welcome.body}</p>{welcome.action && <div className="rd-welcome-actions"><button className="primary" onClick={() => setModalHost(null)}>{welcome.action}</button>{catalogState === "ready" && layout !== "desktop" && <button onClick={() => setDrawerOpen(true)}>호스트 목록 열기</button>}</div>}</div>}{client && tabs.tabs.map((tab) => { const host = hosts.find((item) => item.id === tab.hostId); return host ? <WorkspacePane key={tab.id} tab={tab} host={host} client={client} active={tabs.activeTabId === tab.id} onStatus={reportTabStatus} onSessionId={reportSessionId} fontSize={fontSize} onFontStep={stepFont} containerWidth={layout === 'desktop' ? Math.max(0, rootWidth - HOST_LIST_WIDTH) : rootWidth} isMobile={layout === 'mobile'} /> : null; })}</div>
+    <main className="rd-main" data-sidebar={layout === 'desktop' && sidebarHidden ? 'hidden' : 'shown'}><button className="rd-drawer-scrim" data-open={drawerOpen} aria-label="호스트 목록 닫기" tabIndex={drawerOpen && layout !== 'desktop' ? 0 : -1} onClick={() => { setDrawerOpen(false); drawerButtonRef.current?.focus(); }} /><aside ref={drawerRef} id="rd-host-drawer" className="rd-hosts" data-open={drawerOpen} aria-label="저장된 호스트" onKeyDown={(event) => { if (drawerOpen && layout !== 'desktop') trapTabWithin(event); }}><div className="rd-hosts-head"><strong>호스트</strong><button className="primary compact" onClick={() => { setModalError(''); setModalHost(null); }}>+ 호스트</button></div><label className="rd-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="호스트 검색" placeholder="호스트 검색" value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="rd-host-status" role="status" aria-live="polite">{catalogStatus}<button className="icon" aria-label="호스트 새로고침" onClick={() => void refreshCatalog()}>↻</button></div>{archivedCount > 0 && <button className="rd-archive-toggle" aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>{archiveToggleLabel(archivedCount, showArchived)}</button>}<ul className="rd-host-list" onKeyDown={hostKeyNav}>{visibleHosts.map((host) => { const live = liveByHost.get(host.id); const liveStatus = live?.status ?? 'idle'; const liveLabel = liveStatus === 'connected' ? '연결됨' : liveStatus === 'connecting' ? '연결 중' : liveStatus === 'error' ? '연결 오류' : '연결 안 됨'; return <li key={host.id} data-archived={isArchivedHost(host)} data-selected={selectedHostId === host.id}><button className="rd-host-open" aria-pressed={selectedHostId === host.id} title="눌러서 열기" onClick={() => selectHost(host)}><span className={`rd-host-led rd-host-led--${liveStatus}`} role="img" aria-label={`${liveLabel}${live ? ` · 탭 ${live.count}개` : ''}`} title={liveLabel} /><span className="rd-host-copy"><strong>{host.name}{live && live.count > 1 && <em className="rd-host-badge" aria-hidden="true">{live.count}</em>}</strong><small>{host.username}@{host.hostname}:{host.port}</small>{(hostTags(host).length > 0 || !host.hostKeyTrusted) && <span className="rd-host-tags">{!host.hostKeyTrusted && <span className="rd-chip rd-chip--warn" title="처음 연결할 때 호스트 키를 확인해야 합니다">키 확인 필요</span>}{hostTags(host).slice(0, 3).map((tag) => <span className="rd-chip" key={tag}>{tag}</span>)}</span>}</span></button><button className="icon rd-host-new-tab" aria-label={`${host.name} 새 탭 열기`} title="같은 호스트로 새 탭 열기" onClick={() => openHost(host)}>＋</button><button className="icon rd-host-edit" aria-label={`${host.name} 편집`} onClick={() => { setModalError(''); setModalHost(host); }}>✎</button></li>; })}{visibleHosts.length === 0 && catalogState === 'ready' && <li className="rd-host-empty">{query.trim() ? '검색 결과가 없습니다.' : '표시할 호스트가 없습니다.'}</li>}</ul></aside>
+      <section className="rd-stage" aria-label="원격 작업 공간" aria-hidden={drawerOpen && layout !== 'desktop' || undefined}><div className="rd-session-tabs" role="tablist" aria-label="서버 세션"><button ref={drawerButtonRef} className="rd-drawer-toggle icon" aria-label={(layout === 'desktop' ? !sidebarHidden : drawerOpen) ? '호스트 목록 닫기' : '호스트 목록 열기'} aria-controls="rd-host-drawer" aria-expanded={layout === 'desktop' ? !sidebarHidden : drawerOpen} onClick={toggleSidebar}>☰</button>{tabs.tabs.map((tab, index) => <div className="rd-session-tab" key={tab.id} data-active={tabs.activeTabId === tab.id} data-status={tabStatus[tab.id] ?? 'idle'} onAuxClick={(event) => { if (event.button === 1) { event.preventDefault(); requestCloseTab(tab.id); } }}><button id={`${tab.id}-tab`} role="tab" aria-controls={`${tab.id}-panel`} aria-selected={tabs.activeTabId === tab.id} tabIndex={tabs.activeTabId === tab.id ? 0 : -1} onKeyDown={(event) => tabKeyDown(event, index)} onClick={() => activateTab(tab.id)}><span className={`rd-tab-led rd-tab-led--${tabStatus[tab.id] ?? 'idle'}`} aria-hidden="true" />{tab.label}</button><button className="close" aria-label={`${tab.label} 닫기`} onClick={() => requestCloseTab(tab.id)}>×</button></div>)}<span className="rd-tabs-hint">호스트를 누르면 열기 · ＋ 추가 탭</span></div>
+        <div className="rd-workspace-stack">{tabs.tabs.length === 0 && <div className="rd-welcome"><div className="rd-welcome-icon">⌘</div><h1>{welcome.title}</h1><p>{welcome.body}</p>{catalogState === 'ready' && welcomeHosts.length > 0 && <ul className="rd-welcome-hosts" aria-label="호스트 바로 열기">{welcomeHosts.map((host) => <li key={host.id}><button className="rd-host-card" onClick={() => openHost(host)}><span className="rd-host-led rd-host-led--idle" aria-hidden="true" /><span className="rd-host-card-copy"><strong>{host.name}</strong><small>{host.username}@{host.hostname}:{host.port}</small></span></button></li>)}</ul>}<div className="rd-welcome-actions">{welcome.action && <button className={welcomeHosts.length > 0 ? '' : 'primary'} onClick={() => setModalHost(null)}>{welcome.action}</button>}{catalogState === 'error' && <button className="primary" onClick={() => void refreshCatalog()}>다시 시도</button>}</div></div>}{client && tabs.tabs.map((tab) => { const host = hosts.find((item) => item.id === tab.hostId); return host ? <WorkspacePane key={tab.id} tab={tab} host={host} client={client} active={tabs.activeTabId === tab.id} onStatus={reportTabStatus} onSessionId={reportSessionId} fontSize={fontSize} onFontStep={stepFont} containerWidth={layout === 'desktop' ? Math.max(0, rootWidth - (sidebarHidden ? 0 : HOST_LIST_WIDTH)) : rootWidth} isMobile={layout === 'mobile'} /> : null; })}</div>
       </section></main>
+    {closeConfirm && <Dialog small label="세션 종료 확인" onCancel={() => setCloseConfirm(null)}><p><strong>{closeConfirm.label}</strong> 탭을 닫으면 연결된 SSH 세션이 종료되고, 실행 중인 작업도 함께 끝납니다.</p><div className="rd-modal-actions"><button onClick={() => setCloseConfirm(null)}>취소</button><button className="danger" onClick={() => { const index = tabs.tabs.findIndex((item) => item.id === closeConfirm.tabId); setCloseConfirm(null); if (index >= 0) closeTab(closeConfirm.tabId, index); }}>세션 종료</button></div></Dialog>}
     {modalHost !== undefined && <HostModal key={modalHost?.id ?? 'new'} host={modalHost} credentials={credentials} busy={modalBusy} error={modalError} onCancel={() => setModalHost(undefined)} onSave={saveHost} />}
   </div>;
 }
