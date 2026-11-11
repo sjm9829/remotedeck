@@ -79,9 +79,10 @@ describe('App — same-origin (production) UI contract', () => {
     expect(html).toContain('aria-label="호스트 새로고침"');
     expect(html).toContain('aria-live="polite"');
     expect(html).toContain('aria-controls="rd-host-drawer"');
-    // Desktop: the host list is open, so its toggle reports expanded and offers to close it.
-    expect(html).toContain('aria-expanded="true"');
-    expect(html).toContain('data-sidebar="shown"');
+    // First visit on desktop: the host list starts closed, so its toggle reports collapsed and offers to open it.
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-label="호스트 목록 열기"');
+    expect(html).toContain('data-sidebar="hidden"');
     // The misleading "not an online indicator" legend is gone; LEDs now report live connections.
     expect(html).not.toContain('온라인 상태 아님');
     expect(html).not.toContain('rd-host-key-legend');

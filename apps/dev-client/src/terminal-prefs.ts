@@ -69,8 +69,9 @@ export function saveDock(dock: SftpDock): void {
   writePrefs({ dock });
 }
 
+/** The host list starts closed on a first visit; once the user toggles it, their choice is remembered. */
 export function loadSidebarHidden(): boolean {
-  return readPrefs().sidebarHidden === true;
+  return readPrefs().sidebarHidden !== false;
 }
 
 export function saveSidebarHidden(hidden: boolean): void {
