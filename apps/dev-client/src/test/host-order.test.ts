@@ -1,27 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import type { Host } from '@remotedeck/types';
-import { hasArchivedTag, hostLiveStates, needsCloseConfirm, setArchivedTag, sortHosts, touchRecent } from '../host-order.js';
+import { hasArchivedTag, hostLiveStates, needsCloseConfirm, setArchivedTag, sortHosts } from '../host-order.js';
 
 const host = (id: string, name: string): Host => ({ id, name, hostname: `${id}.lan`, port: 22, username: 'u', credentialId: null, tags: [], hostKeyFingerprint: null, hostKeyTrusted: true, createdAt: '', updatedAt: '' });
 const hosts = [host('c', 'charlie'), host('a', 'alpha'), host('b', 'bravo')];
 
 describe('host ordering', () => {
-  it('puts open hosts first, then recent, then alphabetical', () => {
-    expect(sortHosts(hosts, new Set(), {}).map((h) => h.id)).toEqual(['a', 'b', 'c']);
-    expect(sortHosts(hosts, new Set(), { c: 5, b: 9 }).map((h) => h.id)).toEqual(['b', 'c', 'a']);
-    expect(sortHosts(hosts, new Set(['c']), { b: 9 }).map((h) => h.id)).toEqual(['c', 'b', 'a']);
+  it('sorts by name ascending, ignoring case and comparing digits numerically', () => {
+    const list = [host('1', 'wtr-10'), host('2', 'Alpha'), host('3', 'wtr-2'), host('4', 'beta'), host('5', 'k6-main')];
+    expect(sortHosts(list).map((h) => h.name)).toEqual(['Alpha', 'beta', 'k6-main', 'wtr-2', 'wtr-10']);
   });
-  it('does not mutate its input', () => {
-    const copy = [...hosts];
-    sortHosts(hosts, new Set(['c']), {});
-    expect(hosts).toEqual(copy);
+  it('is stable for equal names and does not mutate its input', () => {
+    const list = [host('b', 'same'), host('a', 'same')];
+    const copy = [...list];
+    expect(sortHosts(list).map((h) => h.id)).toEqual(['a', 'b']);
+    expect(list).toEqual(copy);
   });
-  it('keeps only the most recent entries', () => {
-    let recent = {};
-    for (let i = 0; i < 60; i++) recent = touchRecent(recent, `h${i}`, i);
-    expect(Object.keys(recent)).toHaveLength(50);
-    expect(recent).toHaveProperty('h59');
-    expect(recent).not.toHaveProperty('h0');
+  it('is not affected by connection state', () => {
+    expect(sortHosts(hosts).map((h) => h.id)).toEqual(['a', 'b', 'c']);
   });
 });
 

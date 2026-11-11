@@ -5,47 +5,9 @@ import type { Host } from '@remotedeck/types';
 export type TabLiveStatus = 'idle' | 'connecting' | 'connected' | 'error';
 export interface HostLive { status: TabLiveStatus; count: number }
 
-const RECENT_KEY = 'remotedeck:recent:v1';
-const RECENT_LIMIT = 50;
-
-export type RecentMap = Record<string, number>;
-
-export function loadRecent(): RecentMap {
-  try {
-    const raw = localStorage.getItem(RECENT_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object') return {};
-    const out: RecentMap = {};
-    for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) if (typeof value === 'number' && Number.isFinite(value)) out[id] = value;
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-export function saveRecent(recent: RecentMap): void {
-  try { localStorage.setItem(RECENT_KEY, JSON.stringify(recent)); } catch { /* preference only */ }
-}
-
-/** Record that a host was opened now; keeps only the most recent entries. */
-export function touchRecent(recent: RecentMap, hostId: string, now: number): RecentMap {
-  const next = { ...recent, [hostId]: now };
-  const ids = Object.keys(next);
-  if (ids.length <= RECENT_LIMIT) return next;
-  ids.sort((a, b) => next[b] - next[a]);
-  return Object.fromEntries(ids.slice(0, RECENT_LIMIT).map((id) => [id, next[id]]));
-}
-
-/** Hosts with an open tab first, then most recently opened, then alphabetical. */
-export function sortHosts(hosts: readonly Host[], openIds: ReadonlySet<string>, recent: RecentMap): Host[] {
-  return [...hosts].sort((a, b) => {
-    const openDiff = Number(openIds.has(b.id)) - Number(openIds.has(a.id));
-    if (openDiff) return openDiff;
-    const recentDiff = (recent[b.id] ?? 0) - (recent[a.id] ?? 0);
-    if (recentDiff) return recentDiff;
-    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
-  });
+/** Name ascending (case-insensitive, digits compared numerically: `host2` before `host10`); id breaks ties so the order is stable. */
+export function sortHosts<T extends Pick<Host, 'id' | 'name'>>(hosts: readonly T[]): T[] {
+  return [...hosts].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id));
 }
 
 const STATUS_RANK: Record<TabLiveStatus, number> = { error: 0, idle: 1, connecting: 2, connected: 3 };
