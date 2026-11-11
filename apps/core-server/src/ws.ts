@@ -6,6 +6,36 @@ import type { SessionManager, Attachment } from '@remotedeck/core/session/manage
 import type { TicketStore } from '@remotedeck/core/ticket';
 import { WS_SUBPROTOCOL_PREFIX, type WsMessage } from '@remotedeck/protocol';
 
+/** How often the server pings each terminal socket; a socket that misses one full cycle is dropped. */
+export const WS_HEARTBEAT_INTERVAL_MS = 30_000;
+
+export interface HeartbeatSocket {
+  ping(): void;
+  terminate(): void;
+  on(event: 'pong' | 'close', listener: () => void): unknown;
+}
+
+/**
+ * Protocol-level ping/pong liveness check. A client that vanished without a TCP close
+ * (phone lost signal, laptop slept) would otherwise keep its half-open socket attached
+ * indefinitely and hold the session's writer lease, so a reconnecting client is refused
+ * with `writer_lease_taken`. Terminating the dead socket runs the normal close path
+ * (detach), freeing the lease within roughly two intervals. Returns a stop function.
+ */
+export function startWsHeartbeat(ws: HeartbeatSocket, intervalMs = WS_HEARTBEAT_INTERVAL_MS): () => void {
+  let alive = true;
+  ws.on('pong', () => { alive = true; });
+  const timer = setInterval(() => {
+    if (!alive) { clearInterval(timer); try { ws.terminate(); } catch { /* already gone */ } return; }
+    alive = false;
+    try { ws.ping(); } catch { /* socket not writable; next tick terminates it */ }
+  }, intervalMs);
+  timer.unref?.();
+  const stop = () => clearInterval(timer);
+  ws.on('close', stop);
+  return stop;
+}
+
 export function attachWebSocketServer(app: FastifyInstance, deps: { manager: SessionManager; ticketStore: TicketStore }): () => WebSocketServer {
   const { manager, ticketStore } = deps;
 
@@ -27,6 +57,7 @@ export function attachWebSocketServer(app: FastifyInstance, deps: { manager: Ses
       send: (msg) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg)); },
       close: (code, reason) => { try { ws.close(code, reason); } catch {} },
     };
+    startWsHeartbeat(ws);
     try {
       manager.attach(info.sessionId, attachment);
     } catch (e: any) {
