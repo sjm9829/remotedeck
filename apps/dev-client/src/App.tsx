@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type DragEvent as ReactDragEvent, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import { RemoteDeckClient } from '@remotedeck/client-sdk';
 import type { Credential, Host } from '@remotedeck/types';
 import { resolveConfig } from './config.js';
@@ -9,15 +11,20 @@ import { adoptSocket, closeSocketRef } from './socket-slot.js';
 import { createExclusiveRunner } from './async-guard.js';
 import { createUploadFlow } from './upload-flow.js';
 import { trustPendingSession, type PendingSshTrust } from './ssh-trust-flow.js';
-import { activateMostRecentHostTab, activateWorkspaceTab, addWorkspaceTab, closeWorkspaceTab, createWorkspaceTabsState, type WorkspaceTab, type WorkspaceTabsState } from './workspace-tabs.js';
+import { activateMostRecentHostTab, activateWorkspaceTab, addWorkspaceTab, closeWorkspaceTab, createWorkspaceTabsState, setWorkspaceTabSession, type WorkspaceTab, type WorkspaceTabsState } from './workspace-tabs.js';
+import { MAX_AUTO_ATTEMPTS, backoffMs, classifyClose, isSessionGoneError, isTerminalSessionState } from './reconnect-policy.js';
+import { createHeartbeat } from './heartbeat.js';
+import { FONT_MAX, FONT_MIN, TERMINAL_FONT_FAMILY, TERMINAL_SCROLLBACK, defaultFontSize, loadFontSize, saveFontSize, stepFontSize } from './terminal-prefs.js';
 import { DEFAULT_SFTP_HEIGHT, MAX_SFTP_HEIGHT, MIN_SFTP_HEIGHT, clampSftpHeight, resizeSftpWithKey } from './split-layout.js';
 import { buildCredentialRequest, emptyCredentialDraft, type NewCredentialDraft } from './credential-draft.js';
 import { persistHost } from './host-save.js';
 import { layoutForWidth, type RemoteDeckLayout } from './responsive-layout.js';
+import { MOBILE_KEY_ROWS, NO_MODIFIERS, buttonPress, resolveKeyboardKey, toggleModifier, type ModifierState, type MobileKey } from './mobile-keys.js';
 import { joinSftpPath, parentSftpPath } from './sftp-path.js';
 import { formatSize, sortEntries, fileIcon, type SortKey, type SortDir } from './sftp-list.js';
 import { DEFAULT_SPLIT, clampSplit, otherSide, planBulkMove, planMove, resizeSplitWithKey, type PaneSide } from './dual-pane.js';
 import { createSftpUnmountCleanup } from './sftp-cleanup.js';
+import { shouldStreamDownload, summarizeBulkDelete } from './sftp-download.js';
 import { breadcrumbs } from './sftp-breadcrumb.js';
 import { contextMenuItems, type ContextActionId } from './sftp-context-menu.js';
 import { createBatchUploadFlow } from './sftp-batch-upload.js';
@@ -43,6 +50,20 @@ export function isArchivedHost(host: Pick<Host, 'tags'>): boolean {
 
 export function archiveToggleLabel(count: number, shown: boolean): string {
   return `보관됨 ${count}개 ${shown ? '숨기기' : '표시'}`;
+}
+
+export type CatalogState = 'loading' | 'ready' | 'error';
+
+export type WelcomePanel = { title: string; body: string; action?: string };
+
+/** Workspace welcome copy. The `add first host` call to action belongs only to a
+ *  genuinely empty catalog; a loaded catalog names the saved hosts it already
+ *  offers so a returning user is never asked to add their first host again. */
+export function welcomePanel(state: CatalogState, hostCount: number): WelcomePanel {
+  if (state === 'loading') return { title: '호스트 목록을 불러오는 중입니다', body: '잠시만 기다려 주세요.' };
+  if (state === 'error') return { title: '호스트 목록을 불러오지 못했습니다', body: '왼쪽 위 상태 문구를 확인한 뒤 새로고침 버튼으로 다시 시도해 주세요.' };
+  if (hostCount === 0) return { title: '원격 서버를 한 화면에서 관리하세요', body: '호스트를 추가하면 SSH 터미널과 SFTP 파일 창을 한 번에 열 수 있습니다.', action: '첫 호스트 추가' };
+  return { title: `${hostCount}개의 호스트가 준비되어 있습니다`, body: '목록에서 호스트를 누르면 SSH · SFTP 탭이 열립니다. ＋로 같은 호스트의 탭을 더 열 수 있습니다.', action: '호스트 추가' };
 }
 
 export function filterHosts(hosts: readonly Host[], query: string, includeArchived = false): Host[] {
@@ -128,8 +149,19 @@ function HostModal({ host, credentials, busy, error, onCancel, onSave }: { host:
   </div>;
 }
 
-export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: WorkspaceTab; host: Host; client: RemoteDeckClient; active: boolean; onStatus?: (tabId: string, status: 'idle' | 'connecting' | 'connected' | 'error') => void }) {
-  const [sshState, setSshState] = useState<'idle' | 'connecting' | 'trust' | 'ready' | 'attached' | 'error'>('idle');
+export type SshUiState = 'idle' | 'connecting' | 'trust' | 'ready' | 'attached' | 'reconnecting' | 'disconnected' | 'ended' | 'error';
+
+/** Label of the manual (re)connect button for a terminal state, or null when none applies. */
+export function reconnectLabel(state: SshUiState): string | null {
+  if (state === 'reconnecting') return '지금 다시 연결';
+  if (state === 'disconnected') return '다시 연결';
+  if (state === 'ended') return '새 세션 시작';
+  if (state === 'error') return '다시 시도';
+  return null;
+}
+
+export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId, fontSize = 14, onFontStep }: { tab: WorkspaceTab; host: Host; client: RemoteDeckClient; active: boolean; fontSize?: number; onFontStep?: (delta: number) => void; onStatus?: (tabId: string, status: 'idle' | 'connecting' | 'connected' | 'error') => void; onSessionId?: (tabId: string, sessionId: string | null) => void }) {
+  const [sshState, setSshState] = useState<SshUiState>('idle');
   const [sshStatus, setSshStatus] = useState('연결 전');
   const [sessionId, setSessionId] = useState(tab.sessionId ?? '');
   const [pendingTrust, setPendingTrust] = useState<PendingSshTrust | null>(null);
@@ -141,10 +173,26 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
   const sessionIdRef = useRef(tab.sessionId ?? '');
   const closedSshSessionIdsRef = useRef(new Set<string>());
   const mountedRef = useRef(true);
+  // Reconnect machinery: a restored tab re-attaches to the id saved before reload;
+  // a dropped socket is retried with backoff against the same server session.
+  const restoreIdRef = useRef(tab.sessionId ?? '');
+  const autoRecreateRef = useRef(false);
+  const attemptRef = useRef(0);
+  const retryTimerRef = useRef<number | null>(null);
+  const sshStateRef = useRef<SshUiState>('idle');
+  const socketLostRef = useRef<(code: number, reason: string) => void>(() => undefined);
+  const retryAttachRef = useRef<() => Promise<void>>(async () => undefined);
+  const heartbeat = useMemo(() => createHeartbeat({
+    send: () => { const socket = wsRef.current; if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ping', data: {} })); },
+    onDead: () => { closeSocketRef(wsRef); socketLostRef.current(1006, 'heartbeat'); },
+  }), []);
   const ctrlRef = useRef<ResizeController | null>(null);
   const [collapsedPanes, setCollapsedPanes] = useState(EXPANDED_PANES);
   const { ssh: sshCollapsed, sftp: sftpCollapsed } = collapsedPanes;
   const [mobileView, setMobileView] = useState<'terminal' | 'files'>('terminal');
+  const modifierRef = useRef<ModifierState>(NO_MODIFIERS);
+  const [modsActive, setModsActive] = useState<ModifierState>(NO_MODIFIERS);
+  const applyModifiers = useCallback((next: ModifierState) => { modifierRef.current = next; setModsActive(next); }, []);
   const [sftpHeight, setSftpHeight] = useState(DEFAULT_SFTP_HEIGHT);
   const dragRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
   const [sftpId, setSftpId] = useState('');
@@ -199,17 +247,21 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
   const workspaceStartedRef = useRef(false);
   const workspaceStartRef = useRef<() => Promise<void>>(async () => undefined);
   const terminalKey = terminalIdentity(host);
+  const fontSizeRef = useRef(fontSize);
+  fontSizeRef.current = fontSize;
 
   useEffect(() => { sftpIdRef.current = sftpId; }, [sftpId]);
   useEffect(() => { hostNameRef.current = host.name; }, [host.name]);
   useEffect(() => { sftpPathRef.current = sftpPath; }, [sftpPath]);
   useEffect(() => { sftpFilesRef.current = sftpFiles; }, [sftpFiles]);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+  useEffect(() => { sshStateRef.current = sshState; }, [sshState]);
   useEffect(() => {
-    const mapped = sshState === 'attached' || sshState === 'ready' ? 'connected' : sshState === 'connecting' || sshState === 'trust' ? 'connecting' : sshState === 'error' ? 'error' : 'idle';
+    const mapped = sshState === 'attached' || sshState === 'ready' ? 'connected' : sshState === 'connecting' || sshState === 'trust' || sshState === 'reconnecting' ? 'connecting' : sshState === 'error' || sshState === 'disconnected' ? 'error' : 'idle';
     onStatus?.(tab.id, mapped);
   }, [sshState, onStatus, tab.id]);
   useEffect(() => createSshUnmountCleanup(client, () => sessionIdRef.current, () => closeSocketRef(wsRef), closedSshSessionIdsRef.current), [client]);
+  useEffect(() => () => { heartbeat.stop(); if (retryTimerRef.current !== null) { window.clearTimeout(retryTimerRef.current); retryTimerRef.current = null; } }, [heartbeat]);
   useEffect(() => createSftpUnmountCleanup(client, () => sftpIdRef.current, closedSftpSessionIdsRef.current), [client]);
   const loadSide = useCallback(async (side: PaneSide, id: string, path: string) => { const result = await client.sftpList(id, path); if (!mountedRef.current) return; if (side === 'a') { setSftpFiles(result.files); setSftpPath(result.path); setSftpStatus(result.path || '/'); } else { setBFiles(result.files); setBPath(result.path); } }, [client]);
   const loadFiles = useCallback((id: string, path: string) => loadSide('a', id, path), [loadSide]);
@@ -233,15 +285,62 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
 
   useEffect(() => {
     if (!termEl.current) return;
-    const terminal = new Terminal({ cols: 80, rows: 24, convertEol: true, theme: { background: '#10151d', foreground: '#d8e1ee', cursor: '#55b7ff' } });
-    const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(termEl.current); terminal.writeln(`${hostNameRef.current} — 연결 대기`);
+    const terminal = new Terminal({ cols: 80, rows: 24, convertEol: true, fontSize: fontSizeRef.current, fontFamily: TERMINAL_FONT_FAMILY, scrollback: TERMINAL_SCROLLBACK, macOptionIsMeta: true, allowProposedApi: true, theme: { background: '#10151d', foreground: '#d8e1ee', cursor: '#55b7ff' } });
+    const fit = new FitAddon(); terminal.loadAddon(fit); terminal.loadAddon(new WebLinksAddon());
+    // Unicode 11 widths keep Korean/emoji cells aligned in TUIs (Codex, htop, tmux).
+    try { terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11'; } catch { /* keep default widths */ }
+    terminal.open(termEl.current); terminal.writeln(`${hostNameRef.current} — 연결 대기`);
     terminal.onData((data) => { const socket = wsRef.current; if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: { data } })); });
+    terminal.attachCustomKeyEventHandler((event) => {
+      // Ctrl/Cmd+C with a selection copies it (like Windows Terminal) instead of sending ^C.
+      if (event.type === 'keydown' && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'c' && terminal.hasSelection()) {
+        void navigator.clipboard?.writeText(terminal.getSelection()).catch(() => undefined);
+        terminal.clearSelection();
+        return false;
+      }
+      const mods = modifierRef.current;
+      if (event.type !== 'keydown' || (!mods.ctrl && !mods.alt)) return true;
+      if (event.ctrlKey || event.altKey || event.metaKey) { modifierRef.current = NO_MODIFIERS; setModsActive(NO_MODIFIERS); return true; }
+      const res = resolveKeyboardKey(event.key, mods);
+      modifierRef.current = NO_MODIFIERS; setModsActive(NO_MODIFIERS);
+      const socket = wsRef.current;
+      if (res.data !== null && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: { data: res.data } }));
+      return res.data !== null;
+    });
     const controller = createResizeController({ fit, getSize: () => ({ rows: terminal.rows, cols: terminal.cols }), send: (size) => { const socket = wsRef.current; if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', data: size })); }, target: termEl.current });
     controller.start(); termRef.current = terminal; ctrlRef.current = controller;
-    return () => { controller.dispose(); closeSocketRef(wsRef); terminal.dispose(); termRef.current = null; ctrlRef.current = null; };
+    return () => { controller.dispose(); closeSocketRef(wsRef); terminal.dispose(); termRef.current = null; ctrlRef.current = null; modifierRef.current = NO_MODIFIERS; };
   }, [terminalKey]);
   useEffect(() => { if (active) requestAnimationFrame(() => ctrlRef.current?.fitNow()); }, [active, sshCollapsed, sftpCollapsed, sftpHeight]);
+  useEffect(() => { const terminal = termRef.current; if (!terminal || terminal.options.fontSize === fontSize) return; terminal.options.fontSize = fontSize; requestAnimationFrame(() => ctrlRef.current?.fitNow()); }, [fontSize]);
 
+  // A bar button sends its own bytes without stealing focus from the terminal,
+  // so the on-screen keyboard stays open. Modifiers only prefix software-keyboard
+  // keystrokes (handled by the terminal's custom key handler above).
+  const pressMobileKey = useCallback((key: MobileKey) => {
+    termRef.current?.focus();
+    const res = buttonPress(key, modifierRef.current);
+    if (res.consumed) applyModifiers(NO_MODIFIERS);
+    const socket = wsRef.current;
+    if (res.data && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: { data: res.data } }));
+  }, [applyModifiers]);
+  const pasteClipboard = useCallback(async () => {
+    try { const text = await navigator.clipboard.readText(); if (text) termRef.current?.paste(text); } catch { /* permission denied or empty clipboard */ }
+    termRef.current?.focus();
+  }, []);
+  const toggleMobileModifier = useCallback((name: 'ctrl' | 'alt') => {
+    applyModifiers(toggleModifier(modifierRef.current, name));
+    termRef.current?.focus();
+  }, [applyModifiers]);
+
+  const clearRetry = useCallback(() => { if (retryTimerRef.current !== null) { window.clearTimeout(retryTimerRef.current); retryTimerRef.current = null; } }, []);
+  // The server session is gone for good (shell exited, session closed, restart could not recover it).
+  const endSession = useCallback((message: string) => {
+    clearRetry(); heartbeat.stop(); closeSocketRef(wsRef); autoRecreateRef.current = false;
+    onSessionId?.(tab.id, null);
+    if (!mountedRef.current) return;
+    setSshState('ended'); setSshStatus(message);
+  }, [clearRetry, heartbeat, onSessionId, tab.id]);
   const attachSession = useCallback(async (id: string) => {
     if (!mountedRef.current) return;
     const ticket = await client.wsTicket(id, 'writer');
@@ -249,20 +348,82 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
     const socket = client.connectSession(id, ticket.ticket);
     if (!mountedRef.current) { try { socket.close(); } catch { /* already closed */ } return; }
     adoptSocket(wsRef, socket);
-    socket.onopen = () => { setSshState('attached'); setSshStatus('SSH 연결됨'); termRef.current?.reset(); termRef.current?.writeln(`[${hostNameRef.current} 연결됨]`); ctrlRef.current?.fitNow(); };
-    socket.onmessage = (event) => { try { const message = JSON.parse(event.data); if (message.type === 'output' || message.type === 'scrollback') termRef.current?.write(message.data.data); if (message.type === 'status') setSshStatus(`SSH · ${message.data.status}`); } catch { /* ignore */ } };
-    socket.onclose = () => { if (wsRef.current === socket) wsRef.current = null; setSshState('ready'); setSshStatus('SSH 연결 해제됨'); };
-  }, [client]);
+    socket.onopen = () => { attemptRef.current = 0; autoRecreateRef.current = false; heartbeat.start(); setSshState('attached'); setSshStatus('SSH 연결됨'); termRef.current?.reset(); termRef.current?.writeln(`[${hostNameRef.current} 연결됨]`); ctrlRef.current?.fitNow(); };
+    socket.onmessage = (event) => {
+      heartbeat.touch();
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === 'output' || message.type === 'scrollback') termRef.current?.write(message.data.data);
+        if (message.type === 'status') {
+          if (isTerminalSessionState(message.data.status)) { endSession('SSH 세션이 종료되었습니다'); return; }
+          setSshStatus(message.data.status === 'active' ? 'SSH 연결됨' : `SSH · ${message.data.status}`);
+        }
+      } catch { /* ignore */ }
+    };
+    socket.onclose = (event) => { if (wsRef.current === socket) wsRef.current = null; heartbeat.stop(); socketLostRef.current(event.code, event.reason); };
+  }, [client, endSession, heartbeat]);
+  const scheduleRetry = useCallback(() => {
+    clearRetry();
+    if (!mountedRef.current) return;
+    const attempt = attemptRef.current;
+    if (attempt >= MAX_AUTO_ATTEMPTS) { setSshState('disconnected'); setSshStatus('SSH 연결이 끊어졌습니다'); return; }
+    attemptRef.current = attempt + 1;
+    setSshState('reconnecting'); setSshStatus(`재연결 중… (${attempt + 1}/${MAX_AUTO_ATTEMPTS})`);
+    retryTimerRef.current = window.setTimeout(() => { retryTimerRef.current = null; void retryAttachRef.current(); }, backoffMs(attempt));
+  }, [clearRetry]);
   const connectSsh = useCallback(async () => {
     await sshRunner.run(async () => { setSshState('connecting'); setSshStatus('SSH 연결 중…');
-      try { const created = await client.createSession({ hostId: host.id }); sessionIdRef.current = created.id;
+      try {
+        // A tab restored after a reload re-attaches to its still-running server session.
+        const restoreId = restoreIdRef.current; restoreIdRef.current = '';
+        if (restoreId) {
+          sessionIdRef.current = restoreId; setSessionId(restoreId); autoRecreateRef.current = true; setSshStatus('기존 세션에 다시 연결 중…');
+          try { await attachSession(restoreId); return; }
+          catch (error) {
+            if (!isSessionGoneError((error as Error).message)) { scheduleRetry(); return; }
+            autoRecreateRef.current = false; sessionIdRef.current = ''; setSessionId('');
+          }
+        }
+        const created = await client.createSession({ hostId: host.id }); sessionIdRef.current = created.id;
         if (!mountedRef.current) { closeRemoteSessionOnce(created.id, closedSshSessionIdsRef.current, (id) => client.closeSession(id)); return; }
-        setSessionId(created.id);
+        setSessionId(created.id); onSessionId?.(tab.id, created.id);
         if (created.requiresTrust) { setPendingTrust({ hostId: host.id, sessionId: created.id, fingerprint: created.fingerprint }); setSshState('trust'); setSshStatus('호스트 키 확인 필요'); return; }
         setSshState('ready'); await attachSession(created.id);
       } catch (error) { if (mountedRef.current) { setSshState('error'); setSshStatus(`SSH 오류 · ${(error as Error).message}`); } }
     });
-  }, [attachSession, client, host.id, sshRunner]);
+  }, [attachSession, client, host.id, onSessionId, scheduleRetry, sshRunner, tab.id]);
+  retryAttachRef.current = async () => {
+    const id = sessionIdRef.current;
+    if (!id || !mountedRef.current) return;
+    try { await attachSession(id); }
+    catch (error) { if (isSessionGoneError((error as Error).message)) endSession('SSH 세션이 종료되었습니다'); else scheduleRetry(); }
+  };
+  socketLostRef.current = (code, reason) => {
+    if (!mountedRef.current) return;
+    if (classifyClose(code, reason) === 'session-gone') {
+      // A restored session that no longer exists is replaced silently; a live one that ended is reported.
+      if (autoRecreateRef.current) { autoRecreateRef.current = false; sessionIdRef.current = ''; setSessionId(''); onSessionId?.(tab.id, null); void connectSsh(); return; }
+      endSession('SSH 세션이 종료되었습니다'); return;
+    }
+    scheduleRetry();
+  };
+  const manualReconnect = () => {
+    attemptRef.current = 0; clearRetry();
+    if ((sshState === 'reconnecting' || sshState === 'disconnected') && sessionIdRef.current) { setSshState('reconnecting'); setSshStatus('재연결 중…'); void retryAttachRef.current(); }
+    else void connectSsh();
+  };
+  // Returning to the page (tab switch, phone unlock, network back) is the moment a
+  // silently dead socket is noticed: probe a live socket, retry a waiting one at once.
+  useEffect(() => {
+    const wake = () => {
+      if (document.visibilityState === 'hidden' || !mountedRef.current) return;
+      const state = sshStateRef.current;
+      if (state === 'attached') heartbeat.probe();
+      else if ((state === 'reconnecting' || state === 'disconnected') && sessionIdRef.current) { attemptRef.current = 0; clearRetry(); setSshState('reconnecting'); setSshStatus('재연결 중…'); void retryAttachRef.current(); }
+    };
+    document.addEventListener('visibilitychange', wake); window.addEventListener('online', wake); window.addEventListener('pageshow', wake);
+    return () => { document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake); window.removeEventListener('pageshow', wake); };
+  }, [clearRetry, heartbeat]);
   const approveTrust = async () => { if (!pendingTrust) return; await sshRunner.run(async () => { try { const originalId = await trustPendingSession(client, pendingTrust); sessionIdRef.current = originalId; if (!mountedRef.current) { closeRemoteSessionOnce(originalId, closedSshSessionIdsRef.current, (id) => client.closeSession(id)); return; } setSessionId(originalId); setPendingTrust(null); setSshState('ready'); await attachSession(originalId); } catch (error) { if (mountedRef.current) { setSshState('error'); setSshStatus(`SSH 오류 · ${(error as Error).message}`); } } }); };
 
   const connectSftp = useCallback(async () => {
@@ -289,7 +450,12 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
   const runPrompt = async () => { if (!prompt || !sftpId || !promptValue.trim()) return; const value = promptValue.trim(); const side = prompt.side; const dir = pathRefOf(side).current; await runSftp(async () => { if (prompt.mode === 'mkdir') await client.sftpMkdir(sftpId, joinSftpPath(dir, value)); else await client.sftpRename(sftpId, joinSftpPath(dir, prompt.from), joinSftpPath(dir, value)); await loadSide(side, sftpId, dir); }); setPrompt(null); };
   const confirmDelete = async () => { if (!confirm || !sftpId) return; const side = confirm.side; const dir = pathRefOf(side).current; await runSftp(async () => { const path = joinSftpPath(dir, confirm.name); if (confirm.kind === 'dir') await client.sftpDeleteDir(sftpId, path); else await client.sftpDeleteFile(sftpId, path); await loadSide(side, sftpId, dir); }); setConfirm(null); };
   const selectUpload = async (event: ChangeEvent<HTMLInputElement>, side: PaneSide) => { const file = event.target.files?.[0]; event.target.value = ''; if (!file || !sftpId) return; const dir = pathRefOf(side).current; uploadTarget.current = { side, dir }; const result = await uploadFlow.select(filesRefOf(side).current.map((entry) => entry.name), file); if (result.overwrite) setOverwriteName(file.name); };
-  const download = async (name: string, side: PaneSide) => { if (!sftpId) return; const dir = pathRefOf(side).current; await runSftp(async () => { const blob = await client.sftpDownload(sftpId, joinSftpPath(dir, name)); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 5000); }); };
+  const download = async (name: string, side: PaneSide) => {
+    if (!sftpId) return; const dir = pathRefOf(side).current;
+    // Big files go through the browser's own download manager (streamed, native progress).
+    const size = filesRefOf(side).current.find((entry) => entry.name === name)?.size;
+    if (shouldStreamDownload(size, resolveConfig().mode)) { const anchor = document.createElement('a'); anchor.href = client.sftpDownloadUrl(sftpId, joinSftpPath(dir, name)); anchor.download = name; anchor.click(); return; }
+    await runSftp(async () => { const blob = await client.sftpDownload(sftpId, joinSftpPath(dir, name)); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 5000); }); };
   const toggleDual = () => {
     const next = !dual;
     setDual(next);
@@ -338,10 +504,17 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
   const deleteSelection = (side: PaneSide) => { const sel = selOf(side); const items = selectedInOrder(sel, namesOf(side)).map((n) => { const e = entryOf(side, n); return { name: n, kind: (e && e.type === 'directory' ? 'dir' : 'file') as 'file' | 'dir' }; }); if (items.length) setBulkDelete({ side, items }); };
   const confirmBulkDelete = async () => {
     if (!bulkDelete || !sftpId) return; const { side, items } = bulkDelete; const dir = pathRefOf(side).current;
+    // Keep going after a failure and report exactly what was and was not deleted.
+    const outcome: { deleted: string[]; failed: { name: string; message: string }[] } = { deleted: [], failed: [] };
     await runSftp(async () => {
-      for (const item of items) { const path = joinSftpPath(dir, item.name); if (item.kind === 'dir') await client.sftpDeleteDir(sftpId, path); else await client.sftpDeleteFile(sftpId, path); }
+      for (const item of items) {
+        const path = joinSftpPath(dir, item.name);
+        try { if (item.kind === 'dir') await client.sftpDeleteDir(sftpId, path); else await client.sftpDeleteFile(sftpId, path); outcome.deleted.push(item.name); }
+        catch (error) { outcome.failed.push({ name: item.name, message: (error as Error).message }); }
+      }
       await loadSide(side, sftpId, dir);
     });
+    const summary = summarizeBulkDelete(outcome); if (summary) setSftpError(summary);
     setSelOf(side)(clearSelection());
     setBulkDelete(null);
   };
@@ -428,11 +601,22 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
 
   const terminalPanelId = `${tab.id}-terminal`; const filesPanelId = `${tab.id}-files`;
   return <section id={`${tab.id}-panel`} role="tabpanel" className="rd-workspace" aria-label={`${tab.label} 작업 공간`} hidden={!active} data-workspace-id={tab.id}>
-    <div className="rd-workspace-toolbar"><div className="rd-target"><strong>{host.name}</strong><span>{host.username}@{host.hostname}:{host.port}</span></div><span className={`rd-state rd-state--${sshState}`}>{sshStatus}</span></div>
+    <div className="rd-workspace-toolbar"><div className="rd-target"><strong>{host.name}</strong><span>{host.username}@{host.hostname}:{host.port}</span></div><span className={`rd-state rd-state--${sshState}`}>{sshStatus}</span>{reconnectLabel(sshState) && <button className="compact rd-reconnect" onClick={manualReconnect}>{reconnectLabel(sshState)}</button>}<span className="rd-font-controls" role="group" aria-label="터미널 글자 크기"><button className="rd-font-btn" aria-label="글자 작게" disabled={fontSize <= FONT_MIN} onClick={() => onFontStep?.(-1)}>A−</button><span className="rd-font-size" aria-live="polite">{fontSize}</span><button className="rd-font-btn" aria-label="글자 크게" disabled={fontSize >= FONT_MAX} onClick={() => onFontStep?.(1)}>A+</button></span></div>
     {pendingTrust && <div className="rd-trust" role="alert"><strong>SSH 호스트 키를 확인해 주세요.</strong><code>{pendingTrust.fingerprint}</code><button className="primary compact" onClick={() => void approveTrust()}>신뢰하고 기존 세션 연결</button></div>}
     <div className="rd-mobile-segments" role="tablist" aria-label={`${host.name} 작업 보기`} onKeyDown={segmentKeyDown}><button id={`${tab.id}-terminal-tab`} role="tab" aria-selected={mobileView === 'terminal'} aria-controls={terminalPanelId} tabIndex={mobileView === 'terminal' ? 0 : -1} onClick={() => { setCollapsedPanes(EXPANDED_PANES); setMobileView('terminal'); }}>Terminal</button><button id={`${tab.id}-files-tab`} role="tab" aria-selected={mobileView === 'files'} aria-controls={filesPanelId} tabIndex={mobileView === 'files' ? 0 : -1} onClick={() => { setCollapsedPanes(EXPANDED_PANES); setMobileView('files'); }}>Files</button></div>
+    <div className="rd-mobile-keys" role="toolbar" aria-label={`${host.name} 특수 키`} data-active={mobileView}>
+      <div className="rd-mobile-keys-row">
+        <button type="button" aria-pressed={modsActive.ctrl} className={`rd-mkey rd-mkey--mod${modsActive.ctrl ? ' is-active' : ''}`} title="Ctrl (다음 키에 적용)" onPointerDown={(event) => { event.preventDefault(); toggleMobileModifier('ctrl'); }}>Ctrl</button>
+        <button type="button" aria-pressed={modsActive.alt} className={`rd-mkey rd-mkey--mod${modsActive.alt ? ' is-active' : ''}`} title="Alt (다음 키에 적용)" onPointerDown={(event) => { event.preventDefault(); toggleMobileModifier('alt'); }}>Alt</button>
+        {MOBILE_KEY_ROWS[0].map((key) => <button key={key.id} type="button" title={key.title} aria-label={key.title} className="rd-mkey" onPointerDown={(event) => { event.preventDefault(); pressMobileKey(key); }}>{key.label}</button>)}
+        <button type="button" title="클립보드 붙여넣기" aria-label="클립보드 붙여넣기" className="rd-mkey rd-mkey--paste" onPointerDown={(event) => event.preventDefault()} onClick={() => void pasteClipboard()}>붙임</button>
+      </div>
+      <div className="rd-mobile-keys-row">
+        {MOBILE_KEY_ROWS[1].map((key) => <button key={key.id} type="button" title={key.title} aria-label={key.title} className="rd-mkey" onPointerDown={(event) => { event.preventDefault(); pressMobileKey(key); }}>{key.label}</button>)}
+      </div>
+    </div>
     <div className="rd-split" data-mobile-view={mobileView} data-ssh-collapsed={sshCollapsed} data-sftp-collapsed={sftpCollapsed}>
-      <div id={terminalPanelId} role="tabpanel" className="rd-terminal-pane" aria-label={`${host.name} 터미널`} data-collapsed={sshCollapsed}><div className="rd-terminal-title"><span>SSH 터미널</span><span className="rd-pane-title-actions"><span>{sessionId ? `세션 ${sessionId.slice(0, 8)}` : '대기'}</span><button className="rd-pane-collapse" aria-label={`SSH ${sshCollapsed ? '펼치기' : '접기'}`} aria-expanded={!sshCollapsed} onClick={toggleSshCollapsed}>{sshCollapsed ? '펼치기' : '접기'}</button></span></div><div className="rd-terminal-wrap" ref={termEl} /></div>
+      <div id={terminalPanelId} role="tabpanel" className="rd-terminal-pane" aria-label={`${host.name} 터미널`} data-collapsed={sshCollapsed}><div className="rd-terminal-title"><span>SSH 터미널</span><span className="rd-pane-title-actions"><span className="rd-session-id">{sessionId ? `세션 ${sessionId.slice(0, 8)}` : '대기'}</span><button className="rd-pane-collapse" aria-label={`SSH ${sshCollapsed ? '펼치기' : '접기'}`} aria-expanded={!sshCollapsed} onClick={toggleSshCollapsed}>{sshCollapsed ? '펼치기' : '접기'}</button></span></div><div className="rd-terminal-wrap" ref={termEl} /></div>
       {!sftpCollapsed && !sshCollapsed && <div className="rd-divider" role="separator" aria-label="SSH와 SFTP 패널 높이" aria-orientation="horizontal" aria-valuemin={MIN_SFTP_HEIGHT} aria-valuemax={MAX_SFTP_HEIGHT} aria-valuenow={sftpHeight} tabIndex={0} onPointerDown={startDrag} onPointerMove={drag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onKeyDown={resizeWithKeyboard} />}
       <aside id={filesPanelId} role="tabpanel" className="rd-sftp-pane" aria-label={`${host.name} SFTP 파일`} data-collapsed={sftpCollapsed} style={!sftpCollapsed && !sshCollapsed ? { height: sftpHeight } : undefined}><div className="rd-pane-title"><span>SFTP</span><span className="rd-pane-title-actions"><span className={sftpError ? 'error' : ''}>{sftpBusy ? '작업 중…' : sftpStatus}</span><button className="rd-pane-collapse" aria-pressed={dual} aria-label="SFTP 창 분할" title="두 개의 파일 창을 나란히 표시" onClick={toggleDual}>분할</button><button className="rd-pane-collapse" aria-label={`SFTP ${sftpCollapsed ? '펼치기' : '접기'}`} aria-expanded={!sftpCollapsed} onClick={toggleSftpCollapsed}>{sftpCollapsed ? '펼치기' : '접기'}</button></span></div><div className="rd-sftp-body">
         {sftpTrust && <div className="rd-trust compact-trust" role="alert"><span>SFTP 키 확인</span><code>{sftpTrust.fingerprint}</code><button className="primary compact" onClick={() => void approveSftpTrust()}>신뢰</button></div>}
@@ -457,7 +641,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus }: { tab: Wo
 export function restorePersistedTabs(): { state: WorkspaceTabsState; counter: number } {
   const saved = loadTabState();
   if (!saved || saved.tabs.length === 0) return { state: createWorkspaceTabsState(), counter: 0 };
-  const tabs = saved.tabs.map((t) => ({ id: t.id, hostId: t.hostId, label: t.label, sessionId: null, sftpSessionId: null }));
+  const tabs = saved.tabs.map((t) => ({ id: t.id, hostId: t.hostId, label: t.label, sessionId: t.sessionId ?? null, sftpSessionId: null }));
   let maxN = 0;
   for (const tab of saved.tabs) {
     const match = /^workspace-(\d+)$/.exec(tab.id);
@@ -472,7 +656,7 @@ export function App() {
   const rootRef = useRef<HTMLDivElement | null>(null); const [layout, setLayout] = useState<RemoteDeckLayout>('desktop');
   const [apiBase, setApiBase] = useState('http://localhost:4100'); const [token, setToken] = useState('');
   const client = useMemo(() => config.mode === 'same-origin' ? new RemoteDeckClient({ baseUrl: config.baseUrl, mode: 'same-origin' }) : token ? new RemoteDeckClient({ baseUrl: apiBase, token, mode: 'direct' }) : null, [apiBase, config.baseUrl, config.mode, token]);
-  const [hosts, setHosts] = useState<Host[]>([]); const [credentials, setCredentials] = useState<Credential[]>([]); const [query, setQuery] = useState(''); const [showArchived, setShowArchived] = useState(false); const [catalogStatus, setCatalogStatus] = useState('호스트 불러오는 중…');
+  const [hosts, setHosts] = useState<Host[]>([]); const [credentials, setCredentials] = useState<Credential[]>([]); const [query, setQuery] = useState(''); const [showArchived, setShowArchived] = useState(false); const [catalogStatus, setCatalogStatus] = useState('호스트 불러오는 중…'); const [catalogState, setCatalogState] = useState<CatalogState>('loading');
   // Compute the initial tab layout once. When Workbench navigation reloads the
   // page, sessionStorage restores the same tabs so their panes re-mount and
   // auto-reconnect; fresh counters avoid id collisions with restored tabs.
@@ -483,13 +667,16 @@ export function App() {
   const reportTabStatus = useCallback((tabId: string, status: 'idle' | 'connecting' | 'connected' | 'error') => {
     setTabStatus((current) => current[tabId] === status ? current : { ...current, [tabId]: status });
   }, []);
+  const [fontSize, setFontSize] = useState(() => loadFontSize() ?? defaultFontSize(typeof window !== 'undefined' && window.innerWidth < 600 ? 'mobile' : 'desktop'));
+  const stepFont = useCallback((delta: number) => { setFontSize((current) => { const next = stepFontSize(current, delta); saveFontSize(next); return next; }); }, []);
+  const reportSessionId = useCallback((tabId: string, sessionId: string | null) => { setTabs((current) => setWorkspaceTabSession(current, tabId, sessionId)); }, []);
   const [modalHost, setModalHost] = useState<Host | null | undefined>(undefined); const [modalBusy, setModalBusy] = useState(false); const [modalError, setModalError] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false); const drawerButtonRef = useRef<HTMLButtonElement | null>(null); const drawerRef = useRef<HTMLElement | null>(null);
-  const refreshCatalog = useCallback(async () => { if (!client) { setCatalogStatus('개발 연결 설정을 입력해 주세요.'); return; } setCatalogStatus('호스트 불러오는 중…'); try { const [nextHosts, nextCredentials] = await Promise.all([client.listHosts(), client.listCredentials()]); setHosts(nextHosts); setCredentials(nextCredentials); setCatalogStatus(nextHosts.length ? `${nextHosts.length}개 호스트` : '저장된 호스트가 없습니다.'); } catch (error) { setCatalogStatus(`목록 오류 · ${(error as Error).message}`); } }, [client]);
+  const refreshCatalog = useCallback(async () => { if (!client) { setCatalogState('error'); setCatalogStatus('개발 연결 설정을 입력해 주세요.'); return; } setCatalogState('loading'); setCatalogStatus('호스트 불러오는 중…'); try { const [nextHosts, nextCredentials] = await Promise.all([client.listHosts(), client.listCredentials()]); setHosts(nextHosts); setCredentials(nextCredentials); setCatalogState('ready'); setCatalogStatus(nextHosts.length ? `${nextHosts.length}개 호스트` : '저장된 호스트가 없습니다.'); } catch (error) { setCatalogState('error'); setCatalogStatus(`목록 오류 · ${(error as Error).message}`); } }, [client]);
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
   // Persist tab layout to sessionStorage so tab navigation in Workbench does not lose sessions.
   useEffect(() => {
-    saveTabState({ tabs: tabs.tabs.map((t) => ({ id: t.id, hostId: t.hostId, label: t.label })), activeTabId: tabs.activeTabId });
+    saveTabState({ tabs: tabs.tabs.map((t) => ({ id: t.id, hostId: t.hostId, label: t.label, ...(t.sessionId ? { sessionId: t.sessionId } : {}) })), activeTabId: tabs.activeTabId });
   }, [tabs]);
 
   useEffect(() => {
@@ -499,11 +686,16 @@ export function App() {
     observer.observe(root); return () => observer.disconnect();
   }, []);
   useEffect(() => { if (layout === 'desktop') setDrawerOpen(false); }, [layout]);
-  useEffect(() => { if (drawerOpen) drawerRef.current?.querySelector<HTMLInputElement>('input[type="search"]')?.focus(); }, [drawerOpen]);
+  useEffect(() => { if (drawerOpen) drawerRef.current?.querySelector<HTMLInputElement>('input[type="search"]')?.focus({ preventScroll: true }); }, [drawerOpen]);
   const openHost = (host: Host) => { setSelectedHostId(host.id); const ordinal = (hostOrdinals.current.get(host.id) ?? 0) + 1; hostOrdinals.current.set(host.id, ordinal); tabCounter.current += 1; setTabs((current) => addWorkspaceTab(current, { id: `workspace-${tabCounter.current}`, hostId: host.id, label: `${host.name} · ${ordinal}` })); setDrawerOpen(false); drawerButtonRef.current?.focus(); };
+  // One tap opens the host: an existing tab is re-activated, otherwise a new one opens.
+  // The ＋ button opens an additional tab for the same host.
   const selectHost = (host: Host) => {
-    setSelectedHostId(host.id);
-    setTabs((current) => activateMostRecentHostTab(current, host.id));
+    if (tabs.tabs.some((tab) => tab.hostId === host.id)) {
+      setSelectedHostId(host.id);
+      setTabs((current) => activateMostRecentHostTab(current, host.id));
+      setDrawerOpen(false); drawerButtonRef.current?.focus();
+    } else openHost(host);
   };
   const saveHost = async (draft: HostDraft, newCredential: NewCredentialDraft, clearSecret: () => void) => {
     if (!client) return;
@@ -537,12 +729,13 @@ export function App() {
     if (fallback) requestAnimationFrame(() => document.getElementById(`${fallback.id}-tab`)?.focus());
   };
   const archivedCount = hosts.filter(isArchivedHost).length;
+  const welcome = welcomePanel(catalogState, hosts.length - archivedCount);
   const visibleHosts = filterHosts(hosts, query, showArchived);
   return <div ref={rootRef} className="rd-root" data-layout={layout} onKeyDown={(event) => { if (event.key === 'Escape' && drawerOpen) { setDrawerOpen(false); drawerButtonRef.current?.focus(); } }}>
     {DEV_DIRECT && <details className="rd-dev"><summary>개발 연결 설정</summary><div className="rd-dev-body"><label>API base<input aria-label="API base" value={apiBase} onChange={(event) => setApiBase(event.target.value)} /></label><label>API token<input aria-label="API token" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" /></label></div></details>}
-    <main className="rd-main"><button className="rd-drawer-scrim" data-open={drawerOpen} aria-label="호스트 목록 닫기" tabIndex={drawerOpen && layout !== 'desktop' ? 0 : -1} onClick={() => { setDrawerOpen(false); drawerButtonRef.current?.focus(); }} /><aside ref={drawerRef} id="rd-host-drawer" className="rd-hosts" data-open={drawerOpen} aria-label="저장된 호스트" onKeyDown={(event) => { if (drawerOpen && layout !== 'desktop') trapTabWithin(event); }}><div className="rd-hosts-head"><strong>세션</strong><button className="primary compact" onClick={() => { setModalError(''); setModalHost(null); }}>+ 호스트</button></div><label className="rd-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="호스트 검색" placeholder="호스트 검색" value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="rd-host-status" role="status" aria-live="polite">{catalogStatus}<button className="icon" aria-label="호스트 새로고침" onClick={() => void refreshCatalog()}>↻</button></div><div className="rd-host-key-legend" title="점 표시는 접속 가능 여부가 아니라 저장된 호스트 키의 검증 상태입니다."><span className="rd-host-led trusted" aria-hidden="true" />검증됨 <span className="rd-host-led" aria-hidden="true" />미검증 <small>온라인 상태 아님</small></div>{archivedCount > 0 && <button className="rd-archive-toggle" aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>{archiveToggleLabel(archivedCount, showArchived)}</button>}<ul className="rd-host-list">{visibleHosts.map((host) => <li key={host.id} data-archived={isArchivedHost(host)} data-selected={selectedHostId === host.id}><button className="rd-host-open" aria-pressed={selectedHostId === host.id} title="선택 · 더블클릭하면 새 탭" onClick={() => selectHost(host)} onDoubleClick={() => openHost(host)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openHost(host); } }}><span className={`rd-host-led ${host.hostKeyTrusted ? 'trusted' : ''}`} role="img" aria-label={`호스트 키 ${host.hostKeyTrusted ? '검증됨' : '미검증'}`} title={`호스트 키 ${host.hostKeyTrusted ? '검증됨' : '미검증'} · 온라인 상태 표시 아님`} /><span className="rd-host-copy"><strong>{host.name}</strong><small>{host.username}@{host.hostname}:{host.port}</small></span></button><button className="icon rd-host-new-tab" aria-label={`${host.name} 새 탭 열기`} title="새 탭 열기" onClick={() => openHost(host)}>＋</button><button className="icon rd-host-edit" aria-label={`${host.name} 편집`} onClick={() => { setModalError(''); setModalHost(host); }}>✎</button></li>)}</ul></aside>
-      <section className="rd-stage" aria-label="원격 작업 공간" aria-hidden={drawerOpen && layout !== 'desktop' || undefined}><div className="rd-session-tabs" role="tablist" aria-label="서버 세션"><button ref={drawerButtonRef} className="rd-drawer-toggle icon" aria-label={drawerOpen ? '호스트 목록 닫기' : '호스트 목록 열기'} aria-controls="rd-host-drawer" aria-expanded={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>☰</button>{tabs.tabs.map((tab, index) => <div className="rd-session-tab" key={tab.id} data-active={tabs.activeTabId === tab.id} data-status={tabStatus[tab.id] ?? 'idle'}><button id={`${tab.id}-tab`} role="tab" aria-controls={`${tab.id}-panel`} aria-selected={tabs.activeTabId === tab.id} tabIndex={tabs.activeTabId === tab.id ? 0 : -1} onKeyDown={(event) => tabKeyDown(event, index)} onClick={() => activateTab(tab.id)}><span className={`rd-tab-led rd-tab-led--${tabStatus[tab.id] ?? 'idle'}`} aria-hidden="true" />{tab.label}</button><button className="close" aria-label={`${tab.label} 닫기`} onClick={() => closeTab(tab.id, index)}>×</button></div>)}<span className="rd-tabs-hint">선택 · 더블클릭 또는 ＋로 새 탭</span></div>
-        <div className="rd-workspace-stack">{tabs.tabs.length === 0 && <div className="rd-welcome"><div className="rd-welcome-icon">⌘</div><h1>원격 서버를 한 화면에서 관리하세요</h1><p>호스트를 더블클릭하거나 ＋를 누르면 SSH와 SFTP 작업 탭이 열립니다.</p><button className="primary" onClick={() => setModalHost(null)}>첫 호스트 추가</button></div>}{client && tabs.tabs.map((tab) => { const host = hosts.find((item) => item.id === tab.hostId); return host ? <WorkspacePane key={tab.id} tab={tab} host={host} client={client} active={tabs.activeTabId === tab.id} onStatus={reportTabStatus} /> : null; })}</div>
+    <main className="rd-main"><button className="rd-drawer-scrim" data-open={drawerOpen} aria-label="호스트 목록 닫기" tabIndex={drawerOpen && layout !== 'desktop' ? 0 : -1} onClick={() => { setDrawerOpen(false); drawerButtonRef.current?.focus(); }} /><aside ref={drawerRef} id="rd-host-drawer" className="rd-hosts" data-open={drawerOpen} aria-label="저장된 호스트" onKeyDown={(event) => { if (drawerOpen && layout !== 'desktop') trapTabWithin(event); }}><div className="rd-hosts-head"><strong>세션</strong><button className="primary compact" onClick={() => { setModalError(''); setModalHost(null); }}>+ 호스트</button></div><label className="rd-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="호스트 검색" placeholder="호스트 검색" value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="rd-host-status" role="status" aria-live="polite">{catalogStatus}<button className="icon" aria-label="호스트 새로고침" onClick={() => void refreshCatalog()}>↻</button></div><div className="rd-host-key-legend" title="점 표시는 접속 가능 여부가 아니라 저장된 호스트 키의 검증 상태입니다."><span className="rd-host-led trusted" aria-hidden="true" />검증됨 <span className="rd-host-led" aria-hidden="true" />미검증 <small>온라인 상태 아님</small></div>{archivedCount > 0 && <button className="rd-archive-toggle" aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>{archiveToggleLabel(archivedCount, showArchived)}</button>}<ul className="rd-host-list">{visibleHosts.map((host) => <li key={host.id} data-archived={isArchivedHost(host)} data-selected={selectedHostId === host.id}><button className="rd-host-open" aria-pressed={selectedHostId === host.id} title="눌러서 열기" onClick={() => selectHost(host)}><span className={`rd-host-led ${host.hostKeyTrusted ? 'trusted' : ''}`} role="img" aria-label={`호스트 키 ${host.hostKeyTrusted ? '검증됨' : '미검증'}`} title={`호스트 키 ${host.hostKeyTrusted ? '검증됨' : '미검증'} · 온라인 상태 표시 아님`} /><span className="rd-host-copy"><strong>{host.name}</strong><small>{host.username}@{host.hostname}:{host.port}</small></span></button><button className="icon rd-host-new-tab" aria-label={`${host.name} 새 탭 열기`} title="같은 호스트로 새 탭 열기" onClick={() => openHost(host)}>＋</button><button className="icon rd-host-edit" aria-label={`${host.name} 편집`} onClick={() => { setModalError(''); setModalHost(host); }}>✎</button></li>)}</ul></aside>
+      <section className="rd-stage" aria-label="원격 작업 공간" aria-hidden={drawerOpen && layout !== 'desktop' || undefined}><div className="rd-session-tabs" role="tablist" aria-label="서버 세션"><button ref={drawerButtonRef} className="rd-drawer-toggle icon" aria-label={drawerOpen ? '호스트 목록 닫기' : '호스트 목록 열기'} aria-controls="rd-host-drawer" aria-expanded={drawerOpen} onClick={() => setDrawerOpen((value) => !value)}>☰</button>{tabs.tabs.map((tab, index) => <div className="rd-session-tab" key={tab.id} data-active={tabs.activeTabId === tab.id} data-status={tabStatus[tab.id] ?? 'idle'}><button id={`${tab.id}-tab`} role="tab" aria-controls={`${tab.id}-panel`} aria-selected={tabs.activeTabId === tab.id} tabIndex={tabs.activeTabId === tab.id ? 0 : -1} onKeyDown={(event) => tabKeyDown(event, index)} onClick={() => activateTab(tab.id)}><span className={`rd-tab-led rd-tab-led--${tabStatus[tab.id] ?? 'idle'}`} aria-hidden="true" />{tab.label}</button><button className="close" aria-label={`${tab.label} 닫기`} onClick={() => closeTab(tab.id, index)}>×</button></div>)}<span className="rd-tabs-hint">호스트를 누르면 열기 · ＋ 추가 탭</span></div>
+        <div className="rd-workspace-stack">{tabs.tabs.length === 0 && <div className="rd-welcome"><div className="rd-welcome-icon">⌘</div><h1>{welcome.title}</h1><p>{welcome.body}</p>{welcome.action && <div className="rd-welcome-actions"><button className="primary" onClick={() => setModalHost(null)}>{welcome.action}</button>{catalogState === "ready" && layout !== "desktop" && <button onClick={() => setDrawerOpen(true)}>호스트 목록 열기</button>}</div>}</div>}{client && tabs.tabs.map((tab) => { const host = hosts.find((item) => item.id === tab.hostId); return host ? <WorkspacePane key={tab.id} tab={tab} host={host} client={client} active={tabs.activeTabId === tab.id} onStatus={reportTabStatus} onSessionId={reportSessionId} fontSize={fontSize} onFontStep={stepFont} /> : null; })}</div>
       </section></main>
     {modalHost !== undefined && <HostModal key={modalHost?.id ?? 'new'} host={modalHost} credentials={credentials} busy={modalBusy} error={modalError} onCancel={() => setModalHost(undefined)} onSave={saveHost} />}
   </div>;

@@ -45,3 +45,19 @@ describe('workspace tab state', () => {
     expect(selected.activeTabId).toBe('tab-b');
   });
 });
+
+import { setWorkspaceTabSession } from '../workspace-tabs.js';
+describe('setWorkspaceTabSession', () => {
+  const base = addWorkspaceTab(createWorkspaceTabsState(), { id: 'workspace-1', hostId: 'h1', label: 'A' });
+  it('stores and clears the session id on one tab only', () => {
+    const withTwo = addWorkspaceTab(base, { id: 'workspace-2', hostId: 'h2', label: 'B' });
+    const set = setWorkspaceTabSession(withTwo, 'workspace-1', 's1');
+    expect(set.tabs[0].sessionId).toBe('s1');
+    expect(set.tabs[1].sessionId).toBeNull();
+    expect(setWorkspaceTabSession(set, 'workspace-1', null).tabs[0].sessionId).toBeNull();
+  });
+  it('returns the same state when nothing changes or the tab is unknown', () => {
+    expect(setWorkspaceTabSession(base, 'workspace-1', null)).toBe(base);
+    expect(setWorkspaceTabSession(base, 'nope', 's')).toBe(base);
+  });
+});

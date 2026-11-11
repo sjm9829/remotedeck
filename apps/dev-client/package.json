@@ -11,13 +11,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@xterm/xterm": "^5.5.0",
-    "@xterm/addon-fit": "^0.10.0",
-    "react": "^18.3.0",
-    "react-dom": "^18.3.0",
     "@remotedeck/client-sdk": "*",
     "@remotedeck/protocol": "*",
-    "@remotedeck/types": "*"
+    "@remotedeck/types": "*",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-unicode11": "0.8.0",
+    "@xterm/addon-web-links": "0.11.0",
+    "@xterm/xterm": "^5.5.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",

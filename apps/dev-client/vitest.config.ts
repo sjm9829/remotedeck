@@ -5,5 +5,6 @@ export default defineConfig({
     environment: 'node',
     // Test the config module with a mock for import.meta.env
     globals: false,
+    setupFiles: ['./src/test-setup.ts'],
   },
 });

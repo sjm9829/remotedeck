@@ -55,3 +55,11 @@ export function closeWorkspaceTab(state: WorkspaceTabsState, id: WorkspaceTabId)
   const nextActive = tabs[Math.max(0, index - 1)]?.id ?? null;
   return { tabs, activeTabId: nextActive };
 }
+
+/** Record (or clear) the live SSH session id of one tab. Returns the same state when unchanged. */
+export function setWorkspaceTabSession(state: WorkspaceTabsState, id: WorkspaceTabId, sessionId: string | null): WorkspaceTabsState {
+  const index = state.tabs.findIndex((tab) => tab.id === id);
+  if (index < 0 || state.tabs[index].sessionId === sessionId) return state;
+  const tabs = state.tabs.map((tab, i) => (i === index ? { ...tab, sessionId } : tab));
+  return { ...state, tabs };
+}

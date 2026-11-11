@@ -69,7 +69,7 @@ describe('App — same-origin (production) UI contract', () => {
     expect(html).toContain('+ 호스트');
     expect(html).toContain('role="tablist"');
     expect(html).toContain('aria-label="서버 세션"');
-    expect(html).toContain('더블클릭 또는 ＋로 새 탭');
+    expect(html).toContain('호스트를 누르면 열기');
   });
 
   it('provides accessible labels on the primary controls', async () => {
@@ -128,10 +128,26 @@ describe('App — destructive-confirm modals (renderToString)', () => {
     expect(html).not.toContain('aria-label="새 폴더 이름"');
   });
 
-  it('offers host creation from the empty workspace', async () => {
+  it('does not offer a first-host CTA before the catalog resolves', async () => {
     const html = await render(SAME_ORIGIN_ENV);
-    expect(html).toContain('첫 호스트 추가</button>');
+    expect(html).toContain('호스트 목록을 불러오는 중입니다');
+    expect(html).not.toContain('첫 호스트 추가');
     expect(html).toContain('+ 호스트</button>');
+  });
+
+  it('keeps the first-host CTA for an empty catalog only', async () => {
+    const { welcomePanel } = await import('../App.js');
+    expect(welcomePanel('loading', 0).action).toBeUndefined();
+    expect(welcomePanel('error', 3).action).toBeUndefined();
+    expect(welcomePanel('ready', 0).action).toBe('첫 호스트 추가');
+  });
+
+  it('names the saved hosts instead of asking for a first host', async () => {
+    const { welcomePanel } = await import('../App.js');
+    const panel = welcomePanel('ready', 15);
+    expect(panel.title).toContain('15개');
+    expect(panel.action).toBe('호스트 추가');
+    expect(panel.body).toContain('호스트를 누르면');
   });
 });
 

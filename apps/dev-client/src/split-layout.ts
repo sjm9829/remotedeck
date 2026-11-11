@@ -1,5 +1,5 @@
 export const MIN_SFTP_HEIGHT = 160;
-export const MAX_SFTP_HEIGHT = 440;
+export const MAX_SFTP_HEIGHT = 720;
 export const DEFAULT_SFTP_HEIGHT = 240;
 
 export function clampSftpHeight(height: number): number {

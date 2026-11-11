@@ -1,13 +1,18 @@
 // sessionStorage-backed persistence for workspace tab layout.
 //
 // Credentials and tokens are NEVER stored; only the structural tab state needed
-// to re-create tabs and auto-reconnect on page reload. Session IDs from the
-// previous page are discarded because WebSocket connections are lost on reload.
+// to re-create tabs and auto-reconnect on page reload. The opaque SSH session id
+// is kept so a reload re-attaches to the still-running server session (the server
+// keeps detached sessions and replays scrollback) instead of leaking it and
+// starting a fresh shell. The id grants nothing by itself: attaching still needs
+// an authenticated ws-ticket.
 
 export interface PersistedTab {
   id: string;
   hostId: string;
   label: string;
+  /** Last known live SSH session id for this tab, if any. */
+  sessionId?: string;
 }
 
 export interface PersistedTabState {
@@ -48,5 +53,6 @@ export function clearTabState(): void {
 function isValidTab(t: unknown): t is PersistedTab {
   if (typeof t !== "object" || t === null) return false;
   const obj = t as Record<string, unknown>;
-  return typeof obj.id === "string" && typeof obj.hostId === "string" && typeof obj.label === "string";
+  return typeof obj.id === "string" && typeof obj.hostId === "string" && typeof obj.label === "string"
+    && (obj.sessionId === undefined || typeof obj.sessionId === "string");
 }

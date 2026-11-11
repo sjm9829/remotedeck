@@ -58,3 +58,16 @@ describe('tab state persistence', () => {
     expect(() => clearTabState()).not.toThrow();
   });
 });
+
+describe('session id persistence', () => {
+  it('round-trips an optional session id per tab', () => {
+    const state = { tabs: [{ id: 'workspace-1', hostId: 'h1', label: 'A · 1', sessionId: 'sess-1' }, { id: 'workspace-2', hostId: 'h2', label: 'B · 1' }], activeTabId: 'workspace-1' };
+    saveTabState(state);
+    expect(loadTabState()).toEqual(state);
+  });
+
+  it('rejects a non-string session id', () => {
+    sessionStorage.setItem('remotedeck:tabs:v1', JSON.stringify({ tabs: [{ id: 'a', hostId: 'h', label: 'A', sessionId: 5 }], activeTabId: 'a' }));
+    expect(loadTabState()).toBeNull();
+  });
+});
