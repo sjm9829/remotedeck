@@ -404,3 +404,101 @@ textarea { min-height: 112px; padding-block: 8px; resize: vertical; font-family:
 }
 /* The list fills the sidebar so a host can be dropped anywhere below it to leave its folder. */
 .rd-host-list { flex: 1 1 auto; min-height: 0; }
+
+/* ---- SFTP light theme (Windows Explorer look). Scoped to the file pane, its dialogs and menu only. ---- */
+.rd-sftp-pane, .rd-modal-box.light {
+  color-scheme: light;
+  --rd-bg: #ffffff; --rd-panel: #ffffff; --rd-panel-2: #f0f0f0; --rd-panel-3: #e5f3ff;
+  --rd-border: #e0e0e0; --rd-border-strong: #adadad;
+  --rd-fg: #1a1a1a; --rd-muted: #6d6d6d;
+  --rd-accent: #0078d4; --rd-accent-strong: #005a9e;
+  --rd-danger: #c42b1c; --rd-warn: #8a5a00; --rd-ok: #107c10;
+  color: var(--rd-fg);
+  font-family: "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
+}
+.rd-sftp-pane button, .rd-sftp-pane input, .rd-modal-box.light button, .rd-modal-box.light input { font-family: inherit; }
+.rd-sftp-pane button, .rd-modal-box.light button { border-color: #adadad; border-radius: 2px; background: #f0f0f0; color: #1a1a1a; }
+.rd-sftp-pane button:hover:not(:disabled), .rd-modal-box.light button:hover:not(:disabled) { border-color: #0078d4; background: #e5f1fb; }
+.rd-sftp-pane button.primary, .rd-modal-box.light button.primary { border-color: #005a9e; background: #0078d4; color: #fff; }
+.rd-sftp-pane button.primary:hover:not(:disabled), .rd-modal-box.light button.primary:hover:not(:disabled) { background: #106ebe; border-color: #005a9e; }
+.rd-sftp-pane button.danger, .rd-modal-box.light button.danger { color: #c42b1c; }
+.rd-modal-box.light { border: 1px solid #b4b4b4; border-radius: 4px; background: #fff; box-shadow: 0 10px 36px #0004; }
+.rd-modal-box.light label { color: #1a1a1a; }
+.rd-modal-box.light input { border-color: #7a7a7a; border-radius: 2px; background: #fff; color: #1a1a1a; }
+.rd-modal-box.light input:hover { border-color: #0078d4; }
+.rd-modal-box.light .rd-conflict-list { color: #555; }
+.rd-modal:has(.rd-modal-box.light) { background: #00000047; backdrop-filter: none; }
+
+/* Pane chrome */
+.rd-sftp-pane { background: #fff; }
+.rd-sftp-pane .rd-pane-title { border-bottom: 1px solid #e0e0e0; background: #f5f6f7; color: #444; text-transform: none; letter-spacing: 0; font-size: 12px; }
+.rd-sftp-pane .rd-pane-title-actions { color: #6d6d6d; }
+.rd-sftp-pane .rd-pane-collapse { min-height: 22px; border-color: #c8c8c8; background: #fff; color: #333; }
+.rd-sftp-pane .rd-pane-title .error { color: #c42b1c !important; }
+.rd-sftp-vdivider { background: #e5e5e5; border-inline-color: #d0d0d0; }
+.rd-sftp-vdivider:hover, .rd-sftp-vdivider:focus-visible { background: #0078d4; }
+
+/* Command / address bar */
+.rd-sftp-pane .rd-file-tools { border-bottom: 1px solid #e0e0e0; background: #f5f6f7; gap: 3px; }
+.rd-sftp-pane .rd-tool { border-radius: 2px; background: transparent; color: #444; border-color: transparent; }
+.rd-sftp-pane .rd-tool:hover:not(:disabled), .rd-sftp-pane .rd-upload.rd-tool:hover { border-color: #cce8ff; background: #e5f3ff; color: #1a1a1a; }
+.rd-sftp-pane .rd-tool:active:not(:disabled) { background: #cce8ff; border-color: #99d1ff; }
+.rd-sftp-pane .rd-tool[aria-pressed="true"] { border-color: #99d1ff; background: #cce8ff; color: #005a9e; }
+.rd-sftp-pane .rd-tool-sep { background: #d0d0d0; }
+.rd-sftp-pane .rd-breadcrumb { flex: 1 1 auto; height: 28px; margin: 0 3px; padding: 0 2px; border: 1px solid #d9d9d9; border-radius: 0; background: #fff; }
+.rd-sftp-pane .rd-breadcrumb:hover { border-color: #7eb4ea; }
+.rd-sftp-pane .rd-breadcrumb .crumb { min-height: 22px; padding: 0 5px; border-radius: 0; background: transparent; color: #1a1a1a; font: 12px "Segoe UI", "Malgun Gothic", system-ui, sans-serif; }
+.rd-sftp-pane .rd-breadcrumb .crumb:not(.current):hover:not(:disabled) { background: #e5f3ff; color: #1a1a1a; }
+.rd-sftp-pane .rd-breadcrumb .crumb.current { font-weight: 400; }
+.rd-sftp-pane .rd-breadcrumb .crumb:not(.current)::after { margin-left: 6px; color: #555; }
+
+/* Details view: column headers with separators, flat rows */
+.rd-sftp-pane .rd-file-head { min-height: 26px; border-bottom: 1px solid #e5e5e5; background: #fff; }
+.rd-sftp-pane .rd-file-th { min-height: 25px; padding: 0 8px; border-radius: 0; color: #1e395b; font-size: 12px; text-transform: none; letter-spacing: 0; text-align: left; background: transparent; border-color: transparent; }
+.rd-sftp-pane .rd-file-th ~ .rd-file-th { border-left: 1px solid #e5e5e5; }
+.rd-sftp-pane .rd-file-th:hover:not(:disabled) { background: #d9ebf9; color: #1e395b; border-color: transparent; border-left-color: #e5e5e5; }
+.rd-sftp-pane .rd-file-th.active { background: #f1f7fd; color: #1e395b; }
+.rd-sftp-pane .rd-file-th.rd-col-mtime { text-align: left; }
+.rd-sftp-pane .rd-file-th.rd-col-size { text-align: right; }
+.rd-sftp-pane .rd-filelist { padding: 0; background: #fff; }
+.rd-sftp-pane .rd-file-row { border-radius: 0; padding: 0 6px; border: 1px solid transparent; color: #1a1a1a; }
+.rd-sftp-pane .rd-file-row:hover { background: #e5f3ff; }
+.rd-sftp-pane .rd-file-row[aria-selected="true"] { background: #cce8ff; border-color: #99d1ff; box-shadow: none; }
+.rd-sftp-pane .rd-file-row[aria-selected="true"]:hover { background: #bfe0fa; }
+.rd-sftp-pane .rd-file-row:focus-visible { outline: 1px dotted #1a1a1a; outline-offset: -2px; }
+.rd-sftp-pane .rd-file-row .meta { color: #444; font-size: 12px; }
+.rd-sftp-pane .rd-col-mtime { text-align: left; padding-left: 8px; }
+.rd-sftp-pane .rd-col-size { text-align: right; }
+.rd-sftp-pane .rd-file-name { gap: 6px; }
+.rd-sftp-pane .rd-file-name > svg { width: 16px; height: 16px; flex: 0 0 16px; }
+.rd-sftp-pane .rd-file-name path[fill="#d9a441"] { fill: #ffd35c; stroke: #e0a62a; stroke-width: .8; }
+.rd-sftp-pane .rd-file-name path[fill="#3a4a60"] { fill: #fff; stroke: #8b8b8b; stroke-width: 1; }
+.rd-sftp-pane .rd-file-name path[fill="#52667f"] { fill: #e3e3e3; stroke: #8b8b8b; stroke-width: 1; }
+.rd-sftp-pane .rd-file-sub { color: #6d6d6d; }
+.rd-sftp-pane .rd-row-more { border-radius: 2px; background: transparent; border-color: transparent; color: #555; }
+.rd-sftp-pane .rd-row-more:hover:not(:disabled) { background: #d9ebf9; border-color: transparent; }
+.rd-sftp-pane .rd-check input { accent-color: #0078d4; }
+.rd-sftp-pane .rd-filelist.is-drop { outline: 2px dashed #0078d4; background: #e5f3ff; }
+.rd-sftp-pane .rd-filelist.is-drop::after { color: #005a9e; }
+.rd-sftp-pane .rd-empty-state, .rd-sftp-pane .rd-sftp-unavailable { color: #6d6d6d; }
+.rd-sftp-pane .rd-sftp-unavailable { color: #a4262c; }
+@media (pointer: fine) {
+  .rd-sftp-pane .rd-file-row { min-height: 26px; }
+  .rd-sftp-pane .rd-row-more { width: 24px; height: 24px; min-width: 24px; min-height: 24px; }
+}
+
+/* Status bar, banners */
+.rd-sftp-pane .rd-file-status { min-height: 26px; border-top: 1px solid #e0e0e0; background: #f5f6f7; color: #444; font-size: 12px; }
+.rd-sftp-pane .rd-status-text { color: #1a1a1a; }
+.rd-sftp-pane .rd-status-busy.is-busy { color: #8a5a00; }
+.rd-sftp-pane .rd-status-actions button.compact { min-height: 22px; }
+.rd-sftp-pane .rd-sftp-error { border-bottom: 1px solid #f1bbbc; background: #fde7e9; color: #a4262c; }
+.rd-sftp-pane .rd-sftp-error .icon { background: transparent; border-color: transparent; }
+.rd-sftp-pane .rd-trust { border-bottom: 1px solid #f0d98a; background: #fff4ce; color: #5c4400; }
+
+/* Context menu */
+.rd-context-menu { min-width: 176px; padding: 3px 0; border: 1px solid #cfcfcf; border-radius: 2px; background: #f9f9f9; box-shadow: 0 3px 10px #0003; font-family: "Segoe UI", "Malgun Gothic", system-ui, sans-serif; }
+.rd-context-menu button { min-height: 28px; border-radius: 0; padding: 0 22px 0 28px; color: #1a1a1a; }
+.rd-context-menu button:hover { background: #91c9f7; color: #000; }
+.rd-context-menu button.danger { color: #c42b1c; }
+.rd-context-menu button.danger:hover { background: #fde7e9; color: #a4262c; }
