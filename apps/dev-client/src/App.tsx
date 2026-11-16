@@ -42,7 +42,7 @@ import { closeRemoteSessionOnce } from './session-cleanup.js';
 import { terminalIdentity } from './terminal-identity.js';
 import { saveTabState, loadTabState, type PersistedTabState } from './session-persistence.js';
 import { attachHangulComposer, isIosDevice } from './ios-hangul-input.js';
-import { PASTE_IMAGE_DIR, PASTE_IMAGE_MAX_BYTES, bufferText, copyText, imageFilesFrom, pasteCarriesImage, pasteImageName, readClipboard } from './terminal-clipboard.js';
+import { PASTE_IMAGE_DIR, PASTE_IMAGE_MAX_BYTES, bufferText, copyText, imageFilesFrom, isPasteShortcut, parseOsc52, pasteCarriesImage, pasteImageName, readClipboard } from './terminal-clipboard.js';
 
 const DEV_DIRECT = import.meta.env.VITE_REMOTEDECK_MODE === 'direct';
 /** Width of the always-visible host list in the desktop layout (matches `.rd-main` grid). */
@@ -205,11 +205,21 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     onDead: () => { closeSocketRef(wsRef); socketLostRef.current(1006, 'heartbeat'); },
   }), []);
   const ctrlRef = useRef<ResizeController | null>(null);
+  useEffect(() => {
+    if (sshState !== 'attached') { setLatencyMs(null); return; }
+    const measure = () => { const socket = wsRef.current; if (socket?.readyState !== WebSocket.OPEN || document.hidden) return; pingSentAtRef.current = performance.now(); socket.send(JSON.stringify({ type: 'ping', data: {} })); };
+    const first = window.setTimeout(measure, 800); const repeat = window.setInterval(measure, 10_000);
+    return () => { window.clearTimeout(first); window.clearInterval(repeat); pingSentAtRef.current = 0; };
+  }, [sshState]);
   // Terminal clipboard: copy (selection or the text view) and image paste (upload + path).
   const [textView, setTextView] = useState<string | null>(null);
   const textViewRef = useRef<HTMLTextAreaElement | null>(null);
   const pasteImagesRef = useRef<(files: File[]) => Promise<void>>(async () => undefined);
   const copyTerminalRef = useRef<() => boolean>(() => false);
+  // Round trip to the server (browser -> proxies -> core and back), shown in the toolbar so
+  // a slow network path is visible instead of looking like a slow terminal.
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const pingSentAtRef = useRef(0);
   const [collapsedPanes, setCollapsedPanes] = useState(EXPANDED_PANES);
   const { ssh: sshCollapsed, sftp: sftpCollapsed } = collapsedPanes;
   const [mobileView, setMobileView] = useState<'terminal' | 'files'>('terminal');
@@ -341,9 +351,29 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
       cleanups.push(() => { mount.removeEventListener('paste', onPaste, true); mount.removeEventListener('dragover', onDragOver); mount.removeEventListener('drop', onDrop); });
     }
     copyTerminalRef.current = () => { if (!terminal.hasSelection()) return false; const text = terminal.getSelection(); void copyText(text).then((ok) => notifyRef.current(ok ? '복사했습니다' : '복사하지 못했습니다. 브라우저의 클립보드 권한을 확인해 주세요')); return true; };
+    // Programs that own the mouse (Claude Code, tmux, vim) copy with OSC 52.
+    try {
+      const osc = terminal.parser.registerOscHandler(52, (data) => {
+        const text = parseOsc52(data);
+        if (text) void copyText(text).then((ok) => { if (ok) notifyRef.current('복사했습니다'); else if (mountedRef.current) setTextView(text); });
+        return true;
+      });
+      cleanups.push(() => osc.dispose());
+    } catch { /* parser hooks unavailable */ }
+    {
+      // Right-click on a selection copies it (Windows Terminal / PuTTY habit); with nothing
+      // selected the browser menu opens as usual, and its Paste works.
+      const mount = termEl.current;
+      const onContextMenu = (event: MouseEvent) => { if (!terminal.hasSelection()) return; event.preventDefault(); event.stopPropagation(); if (copyTerminalRef.current()) terminal.clearSelection(); };
+      mount.addEventListener('contextmenu', onContextMenu, true);
+      cleanups.push(() => mount.removeEventListener('contextmenu', onContextMenu, true));
+    }
     terminal.onData((data) => { const socket = wsRef.current; if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: { data } })); });
     terminal.attachCustomKeyEventHandler((event) => {
       // Ctrl/Cmd+C with a selection copies it (like Windows Terminal) instead of sending ^C.
+      // Ctrl+V: xterm.js would send ^V to the shell and cancel the browser's paste. Leaving the
+      // key alone lets the browser fire a real paste event (text, or an image handled above).
+      if (isPasteShortcut(event)) return false;
       // Ctrl+Shift+C copies too (Linux terminal habit); without a selection it does nothing.
       if (event.type === 'keydown' && (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'c' && (terminal.hasSelection() || event.shiftKey)) {
         event.preventDefault(); // the plain-http copy fallback moves focus; keep the key from doing anything else
@@ -457,6 +487,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
       try {
         const message = JSON.parse(event.data);
         if (message.type === 'output' || message.type === 'scrollback') termRef.current?.write(message.data.data);
+        if (message.type === 'pong' && pingSentAtRef.current) { setLatencyMs(Math.round(performance.now() - pingSentAtRef.current)); pingSentAtRef.current = 0; }
         if (message.type === 'status') {
           if (isTerminalSessionState(message.data.status)) { endSession('SSH 세션이 종료되었습니다'); return; }
           setSshStatus(message.data.status === 'active' ? 'SSH 연결됨' : `SSH · ${message.data.status}`);
@@ -760,7 +791,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
 
   const terminalPanelId = `${tab.id}-terminal`; const filesPanelId = `${tab.id}-files`;
   return <section id={`${tab.id}-panel`} role="tabpanel" className="rd-workspace" aria-label={`${tab.label} 작업 공간`} hidden={!active} data-workspace-id={tab.id}>
-    <div className="rd-workspace-toolbar"><div className="rd-target"><strong>{host.name}</strong><span>{host.username}@{host.hostname}:{host.port}</span></div><span className={`rd-state rd-state--${sshState}`}>{sshStatus}</span>{reconnectLabel(sshState) && <button className="compact rd-reconnect" onClick={manualReconnect}>{reconnectLabel(sshState)}</button>}<span className="rd-clip-controls" role="group" aria-label="터미널 클립보드"><button className="rd-font-btn" title="선택한 내용 복사 · 선택이 없으면 터미널 내용을 글자로 열어 고를 수 있습니다" onClick={copyFromTerminal}>복사</button><button className="rd-font-btn" title="클립보드 붙여넣기 · 이미지는 서버에 올린 뒤 경로를 입력합니다" onClick={() => void pasteClipboard()}>붙여넣기</button></span><span className="rd-font-controls" role="group" aria-label="터미널 글자 크기"><button className="rd-font-btn" aria-label="글자 작게" disabled={fontSize <= FONT_MIN} onClick={() => onFontStep?.(-1)}>A−</button><span className="rd-font-size" aria-live="polite">{fontSize}</span><button className="rd-font-btn" aria-label="글자 크게" disabled={fontSize >= FONT_MAX} onClick={() => onFontStep?.(1)}>A+</button></span></div>
+    <div className="rd-workspace-toolbar"><div className="rd-target"><strong>{host.name}</strong><span>{host.username}@{host.hostname}:{host.port}</span></div><span className={`rd-state rd-state--${sshState}`}>{sshStatus}</span>{latencyMs !== null && <span className="rd-latency" data-level={latencyMs >= 150 ? 'slow' : latencyMs >= 60 ? 'fair' : 'good'} title="브라우저에서 서버까지 왕복 시간입니다. 키를 누른 뒤 글자가 보이기까지 최소 이만큼 걸립니다.">지연 {latencyMs}ms</span>}{reconnectLabel(sshState) && <button className="compact rd-reconnect" onClick={manualReconnect}>{reconnectLabel(sshState)}</button>}<span className="rd-clip-controls" role="group" aria-label="터미널 클립보드"><button className="rd-font-btn" title="선택한 내용 복사 · 선택이 없으면 터미널 내용을 글자로 열어 고를 수 있습니다" onClick={copyFromTerminal}>복사</button><button className="rd-font-btn" title="클립보드 붙여넣기 · 이미지는 서버에 올린 뒤 경로를 입력합니다" onClick={() => void pasteClipboard()}>붙여넣기</button></span><span className="rd-font-controls" role="group" aria-label="터미널 글자 크기"><button className="rd-font-btn" aria-label="글자 작게" disabled={fontSize <= FONT_MIN} onClick={() => onFontStep?.(-1)}>A−</button><span className="rd-font-size" aria-live="polite">{fontSize}</span><button className="rd-font-btn" aria-label="글자 크게" disabled={fontSize >= FONT_MAX} onClick={() => onFontStep?.(1)}>A+</button></span></div>
     {pendingTrust && <div className="rd-trust" role="alert"><strong>SSH 호스트 키를 확인해 주세요.</strong><code>{pendingTrust.fingerprint}</code><button className="primary compact" onClick={() => void approveTrust()}>신뢰하고 기존 세션 연결</button></div>}
     <div className="rd-mobile-segments" role="tablist" aria-label={`${host.name} 작업 보기`} onKeyDown={segmentKeyDown}><button id={`${tab.id}-terminal-tab`} role="tab" aria-selected={mobileView === 'terminal'} aria-controls={terminalPanelId} tabIndex={mobileView === 'terminal' ? 0 : -1} onClick={() => { setCollapsedPanes(EXPANDED_PANES); setMobileView('terminal'); }}>Terminal</button><button id={`${tab.id}-files-tab`} role="tab" aria-selected={mobileView === 'files'} aria-controls={filesPanelId} tabIndex={mobileView === 'files' ? 0 : -1} onClick={() => { setCollapsedPanes(EXPANDED_PANES); setMobileView('files'); }}>Files</button></div>
     <div className="rd-mobile-keys" role="toolbar" aria-label={`${host.name} 특수 키`} data-active={mobileView}>

@@ -136,3 +136,33 @@ export function bufferText(buffer: BufferLike, maxLines = 2000): string {
   while (lines.length && lines[lines.length - 1] === '') lines.pop();
   return lines.slice(-maxLines).join('\n');
 }
+
+const OSC52_MAX_BASE64 = 2 * 1024 * 1024;
+
+/**
+ * Text a program asks to put on the clipboard with OSC 52 ("52;c;<base64>").
+ * Full-screen programs that take over the mouse (Claude Code, tmux, vim) select text
+ * themselves and copy this way, so without it "copy" silently does nothing.
+ * A read request ("?") is never answered: a remote host must not see the local clipboard.
+ */
+export function parseOsc52(data: string): string | null {
+  const split = data.indexOf(';');
+  if (split < 0) return null;
+  const payload = data.slice(split + 1).trim();
+  if (!payload || payload === '?' || payload.length > OSC52_MAX_BASE64) return null;
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload)) return null;
+  try {
+    const binary = atob(payload);
+    const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
+    const text = new TextDecoder('utf-8').decode(bytes);
+    return text || null;
+  } catch { return null; }
+}
+
+/** Ctrl+V / Ctrl+Shift+V (and Shift+Insert): leave to the browser so it fires a real paste. */
+export function isPasteShortcut(event: { type?: string; key?: string; ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; shiftKey?: boolean }): boolean {
+  if (event.type !== 'keydown' || event.altKey) return false;
+  const key = (event.key ?? '').toLowerCase();
+  if (key === 'v' && (event.ctrlKey || event.metaKey)) return true;
+  return key === 'insert' && Boolean(event.shiftKey) && !event.ctrlKey && !event.metaKey;
+}

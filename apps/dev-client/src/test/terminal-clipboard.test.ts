@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { bufferText, copyText, imageFilesFrom, pasteCarriesImage, pasteImageName, readClipboard } from '../terminal-clipboard.js';
+import { bufferText, copyText, imageFilesFrom, isPasteShortcut, parseOsc52, pasteCarriesImage, pasteImageName, readClipboard } from '../terminal-clipboard.js';
 
 const png = () => new File([new Uint8Array([1, 2, 3])], 'image.png', { type: 'image/png' });
 
@@ -91,5 +91,33 @@ describe('bufferText', () => {
   });
   it('keeps only the newest lines', () => {
     expect(bufferText(buf([['1'], ['2'], ['3']]), 2)).toBe('2\n3');
+  });
+});
+
+describe('parseOsc52', () => {
+  const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
+  it('decodes clipboard text, including Korean', () => {
+    expect(parseOsc52(`c;${b64('hello')}`)).toBe('hello');
+    expect(parseOsc52(`;${b64('한글 복사 😀')}`)).toBe('한글 복사 😀');
+    expect(parseOsc52(`pc;${b64('line1\nline2')}`)).toBe('line1\nline2');
+  });
+  it('never answers a read request and rejects junk', () => {
+    expect(parseOsc52('c;?')).toBeNull();
+    expect(parseOsc52('c;')).toBeNull();
+    expect(parseOsc52('nonsense')).toBeNull();
+    expect(parseOsc52('c;not base64!')).toBeNull();
+  });
+});
+
+describe('isPasteShortcut', () => {
+  it('matches Ctrl+V, Ctrl+Shift+V, Cmd+V and Shift+Insert on keydown only', () => {
+    expect(isPasteShortcut({ type: 'keydown', key: 'v', ctrlKey: true })).toBe(true);
+    expect(isPasteShortcut({ type: 'keydown', key: 'V', ctrlKey: true, shiftKey: true })).toBe(true);
+    expect(isPasteShortcut({ type: 'keydown', key: 'v', metaKey: true })).toBe(true);
+    expect(isPasteShortcut({ type: 'keydown', key: 'Insert', shiftKey: true })).toBe(true);
+    expect(isPasteShortcut({ type: 'keyup', key: 'v', ctrlKey: true })).toBe(false);
+    expect(isPasteShortcut({ type: 'keydown', key: 'v' })).toBe(false);
+    expect(isPasteShortcut({ type: 'keydown', key: 'v', ctrlKey: true, altKey: true })).toBe(false);
+    expect(isPasteShortcut({ type: 'keydown', key: 'c', ctrlKey: true })).toBe(false);
   });
 });

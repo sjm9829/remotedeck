@@ -108,6 +108,9 @@ textarea { min-height: 112px; padding-block: 8px; resize: vertical; font-family:
 .rd-target span { color: var(--rd-muted); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; }
 .rd-state { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--rd-muted); white-space: nowrap; font-size: 11px; }
 .rd-state--attached { color: var(--rd-ok); }
+.rd-latency { flex: 0 0 auto; padding: 1px 7px; border: 1px solid var(--rd-border-strong); border-radius: 999px; color: var(--rd-muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rd-latency[data-level="fair"] { color: var(--rd-warn); }
+.rd-latency[data-level="slow"] { border-color: var(--rd-danger); color: var(--rd-danger); }
 .rd-state--error { color: var(--rd-danger); }
 .rd-state--trust, .rd-state--reconnecting { color: var(--rd-warn); }
 .rd-state--disconnected, .rd-state--ended { color: var(--rd-danger); }
