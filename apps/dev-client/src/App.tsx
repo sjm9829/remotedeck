@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WebglAddon } from '@xterm/addon-webgl';
 import { RemoteDeckClient } from '@remotedeck/client-sdk';
 import type { Credential, Host } from '@remotedeck/types';
 import { resolveConfig } from './config.js';
@@ -40,6 +41,8 @@ import { EXPANDED_PANES, togglePaneCollapse } from './pane-collapse.js';
 import { closeRemoteSessionOnce } from './session-cleanup.js';
 import { terminalIdentity } from './terminal-identity.js';
 import { saveTabState, loadTabState, type PersistedTabState } from './session-persistence.js';
+import { attachHangulComposer, isIosDevice } from './ios-hangul-input.js';
+import { PASTE_IMAGE_DIR, PASTE_IMAGE_MAX_BYTES, bufferText, copyText, imageFilesFrom, pasteCarriesImage, pasteImageName, readClipboard } from './terminal-clipboard.js';
 
 const DEV_DIRECT = import.meta.env.VITE_REMOTEDECK_MODE === 'direct';
 /** Width of the always-visible host list in the desktop layout (matches `.rd-main` grid). */
@@ -202,6 +205,11 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     onDead: () => { closeSocketRef(wsRef); socketLostRef.current(1006, 'heartbeat'); },
   }), []);
   const ctrlRef = useRef<ResizeController | null>(null);
+  // Terminal clipboard: copy (selection or the text view) and image paste (upload + path).
+  const [textView, setTextView] = useState<string | null>(null);
+  const textViewRef = useRef<HTMLTextAreaElement | null>(null);
+  const pasteImagesRef = useRef<(files: File[]) => Promise<void>>(async () => undefined);
+  const copyTerminalRef = useRef<() => boolean>(() => false);
   const [collapsedPanes, setCollapsedPanes] = useState(EXPANDED_PANES);
   const { ssh: sshCollapsed, sftp: sftpCollapsed } = collapsedPanes;
   const [mobileView, setMobileView] = useState<'terminal' | 'files'>('terminal');
@@ -274,6 +282,9 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   fontSizeRef.current = fontSize;
 
   useEffect(() => { sftpIdRef.current = sftpId; }, [sftpId]);
+  // Only set once the SFTP session is usable (host key trusted), unlike sftpIdRef.
+  const sftpReadyIdRef = useRef('');
+  useEffect(() => { sftpReadyIdRef.current = sftpId; }, [sftpId]);
   useEffect(() => { hostNameRef.current = host.name; }, [host.name]);
   useEffect(() => { sftpPathRef.current = sftpPath; }, [sftpPath]);
   useEffect(() => { sftpFilesRef.current = sftpFiles; }, [sftpFiles]);
@@ -313,12 +324,30 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     // Unicode 11 widths keep Korean/emoji cells aligned in TUIs (Codex, htop, tmux).
     try { terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11'; } catch { /* keep default widths */ }
     terminal.open(termEl.current); terminal.writeln(`${hostNameRef.current} — 연결 대기`);
+    // GPU renderer: the default DOM renderer rebuilds a row of <span>s per line and is
+    // several times slower on busy output. If WebGL is missing, or the browser drops the
+    // context (too many tabs), the terminal falls back to the DOM renderer by itself.
+    try { const webgl = new WebglAddon(); webgl.onContextLoss(() => { try { webgl.dispose(); } catch { /* already disposed */ } }); terminal.loadAddon(webgl); } catch { /* keep the DOM renderer */ }
+    const cleanups: Array<() => void> = [];
+    // iOS/iPadOS Korean keyboards do not use composition events; see ios-hangul-input.ts.
+    if (isIosDevice() && terminal.element && terminal.textarea) cleanups.push(attachHangulComposer(terminal.element, terminal.textarea, { send: (data) => terminal.input(data, true), modifiersArmed: () => modifierRef.current.ctrl || modifierRef.current.alt }));
+    {
+      // An image pasted or dropped on the terminal is uploaded and its remote path typed in.
+      const mount = termEl.current;
+      const onPaste = (event: ClipboardEvent) => { if (!pasteCarriesImage(event.clipboardData)) return; event.preventDefault(); event.stopPropagation(); void pasteImagesRef.current(imageFilesFrom(event.clipboardData)); };
+      const onDragOver = (event: DragEvent) => { if (Array.from(event.dataTransfer?.types ?? []).includes('Files')) event.preventDefault(); };
+      const onDrop = (event: DragEvent) => { const images = imageFilesFrom(event.dataTransfer); if (!images.length) return; event.preventDefault(); event.stopPropagation(); void pasteImagesRef.current(images); };
+      mount.addEventListener('paste', onPaste, true); mount.addEventListener('dragover', onDragOver); mount.addEventListener('drop', onDrop);
+      cleanups.push(() => { mount.removeEventListener('paste', onPaste, true); mount.removeEventListener('dragover', onDragOver); mount.removeEventListener('drop', onDrop); });
+    }
+    copyTerminalRef.current = () => { if (!terminal.hasSelection()) return false; const text = terminal.getSelection(); void copyText(text).then((ok) => notifyRef.current(ok ? '복사했습니다' : '복사하지 못했습니다. 브라우저의 클립보드 권한을 확인해 주세요')); return true; };
     terminal.onData((data) => { const socket = wsRef.current; if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: { data } })); });
     terminal.attachCustomKeyEventHandler((event) => {
       // Ctrl/Cmd+C with a selection copies it (like Windows Terminal) instead of sending ^C.
-      if (event.type === 'keydown' && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'c' && terminal.hasSelection()) {
-        void navigator.clipboard?.writeText(terminal.getSelection()).then(() => notifyRef.current('복사했습니다')).catch(() => undefined);
-        terminal.clearSelection();
+      // Ctrl+Shift+C copies too (Linux terminal habit); without a selection it does nothing.
+      if (event.type === 'keydown' && (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'c' && (terminal.hasSelection() || event.shiftKey)) {
+        event.preventDefault(); // the plain-http copy fallback moves focus; keep the key from doing anything else
+        if (copyTerminalRef.current()) terminal.clearSelection();
         return false;
       }
       const mods = modifierRef.current;
@@ -332,7 +361,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     });
     const controller = createResizeController({ fit, getSize: () => ({ rows: terminal.rows, cols: terminal.cols }), send: (size) => { const socket = wsRef.current; if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', data: size })); }, target: termEl.current });
     controller.start(); termRef.current = terminal; ctrlRef.current = controller;
-    return () => { controller.dispose(); closeSocketRef(wsRef); terminal.dispose(); termRef.current = null; ctrlRef.current = null; modifierRef.current = NO_MODIFIERS; };
+    return () => { for (const cleanup of cleanups) cleanup(); copyTerminalRef.current = () => false; controller.dispose(); closeSocketRef(wsRef); terminal.dispose(); termRef.current = null; ctrlRef.current = null; modifierRef.current = NO_MODIFIERS; };
   }, [terminalKey]);
   useEffect(() => { if (active) requestAnimationFrame(() => ctrlRef.current?.fitNow()); }, [active, sshCollapsed, sftpCollapsed, sftpHeight, sftpWidth, dockMode]);
   useEffect(() => { const terminal = termRef.current; if (!terminal || terminal.options.fontSize === fontSize) return; terminal.options.fontSize = fontSize; requestAnimationFrame(() => ctrlRef.current?.fitNow()); }, [fontSize]);
@@ -347,10 +376,61 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     const socket = wsRef.current;
     if (res.data && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: { data: res.data } }));
   }, [applyModifiers]);
+  // Upload pasted images to the remote host and type their paths into the terminal.
+  // Reuses the tab's SFTP session when the file pane is connected; otherwise opens a
+  // short-lived one just for the upload.
+  const pasteImages = useCallback(async (files: File[]) => {
+    const images = files.filter((file) => file.size > 0);
+    if (!images.length) return;
+    const tooBig = images.find((file) => file.size > PASTE_IMAGE_MAX_BYTES);
+    if (tooBig) { notifyRef.current(`이미지가 너무 큽니다 (최대 ${Math.round(PASTE_IMAGE_MAX_BYTES / 1024 / 1024)}MB)`); return; }
+    notifyRef.current(images.length > 1 ? `이미지 ${images.length}개 업로드 중…` : '이미지 업로드 중…');
+    let id = sftpReadyIdRef.current; let temporary = '';
+    try {
+      if (!id) {
+        const created = await client.createSftpSession({ hostId: host.id, rootPath: '/' });
+        temporary = created.session.id;
+        if (created.requiresTrust) { notifyRef.current('이미지를 올리려면 먼저 파일 패널에서 SFTP 호스트 키를 신뢰해 주세요'); return; }
+        id = temporary;
+      }
+      const now = new Date(); const paths: string[] = [];
+      for (const [index, file] of images.entries()) {
+        const name = pasteImageName(file.type, now, index);
+        await client.sftpUpload(id, joinSftpPath(PASTE_IMAGE_DIR, name), file, false);
+        paths.push(`/${PASTE_IMAGE_DIR}/${name}`);
+      }
+      if (!mountedRef.current) return;
+      termRef.current?.paste(`${paths.join(' ')} `);
+      termRef.current?.focus();
+      notifyRef.current(`이미지 업로드 완료 · ${paths[0]}${paths.length > 1 ? ` 외 ${paths.length - 1}개` : ''}`);
+    } catch (error) {
+      notifyRef.current(`이미지를 올리지 못했습니다 · ${(error as Error).message}`);
+    } finally {
+      if (temporary) void client.closeSftpSession(temporary).catch(() => undefined);
+    }
+  }, [client, host.id]);
+  pasteImagesRef.current = pasteImages;
   const pasteClipboard = useCallback(async () => {
-    try { const text = await navigator.clipboard.readText(); if (text) termRef.current?.paste(text); } catch { /* permission denied or empty clipboard */ }
+    const content = await readClipboard();
+    if (content.images.length) await pasteImages(content.images);
+    else if (content.text) termRef.current?.paste(content.text);
+    else if (content.unavailable) notifyRef.current('브라우저가 클립보드 읽기를 막았습니다. Ctrl+V(⌘V)로 붙여넣어 주세요');
     termRef.current?.focus();
+  }, [pasteImages]);
+  // Copy button: the mouse selection if there is one; otherwise open the terminal text in a
+  // plain text box, where touch devices can select with the native handles.
+  const copyFromTerminal = useCallback(() => {
+    if (copyTerminalRef.current()) { termRef.current?.focus(); return; }
+    const terminal = termRef.current; if (!terminal) return;
+    setTextView(bufferText(terminal.buffer.active));
   }, []);
+  const closeTextView = useCallback(() => { setTextView(null); requestAnimationFrame(() => termRef.current?.focus()); }, []);
+  const copyTextView = useCallback(() => {
+    const area = textViewRef.current; const whole = textView ?? '';
+    const picked = area && area.selectionEnd > area.selectionStart ? area.value.slice(area.selectionStart, area.selectionEnd) : whole;
+    void copyText(picked).then((ok) => { notifyRef.current(ok ? (picked === whole ? '전체를 복사했습니다' : '선택한 부분을 복사했습니다') : '복사하지 못했습니다. 직접 선택해 복사해 주세요'); if (ok) closeTextView(); });
+  }, [closeTextView, textView]);
+  useEffect(() => { const area = textViewRef.current; if (textView !== null && area) area.scrollTop = area.scrollHeight; }, [textView]);
   const toggleMobileModifier = useCallback((name: 'ctrl' | 'alt') => {
     applyModifiers(toggleModifier(modifierRef.current, name));
     termRef.current?.focus();
@@ -680,7 +760,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
 
   const terminalPanelId = `${tab.id}-terminal`; const filesPanelId = `${tab.id}-files`;
   return <section id={`${tab.id}-panel`} role="tabpanel" className="rd-workspace" aria-label={`${tab.label} 작업 공간`} hidden={!active} data-workspace-id={tab.id}>
-    <div className="rd-workspace-toolbar"><div className="rd-target"><strong>{host.name}</strong><span>{host.username}@{host.hostname}:{host.port}</span></div><span className={`rd-state rd-state--${sshState}`}>{sshStatus}</span>{reconnectLabel(sshState) && <button className="compact rd-reconnect" onClick={manualReconnect}>{reconnectLabel(sshState)}</button>}<span className="rd-font-controls" role="group" aria-label="터미널 글자 크기"><button className="rd-font-btn" aria-label="글자 작게" disabled={fontSize <= FONT_MIN} onClick={() => onFontStep?.(-1)}>A−</button><span className="rd-font-size" aria-live="polite">{fontSize}</span><button className="rd-font-btn" aria-label="글자 크게" disabled={fontSize >= FONT_MAX} onClick={() => onFontStep?.(1)}>A+</button></span></div>
+    <div className="rd-workspace-toolbar"><div className="rd-target"><strong>{host.name}</strong><span>{host.username}@{host.hostname}:{host.port}</span></div><span className={`rd-state rd-state--${sshState}`}>{sshStatus}</span>{reconnectLabel(sshState) && <button className="compact rd-reconnect" onClick={manualReconnect}>{reconnectLabel(sshState)}</button>}<span className="rd-clip-controls" role="group" aria-label="터미널 클립보드"><button className="rd-font-btn" title="선택한 내용 복사 · 선택이 없으면 터미널 내용을 글자로 열어 고를 수 있습니다" onClick={copyFromTerminal}>복사</button><button className="rd-font-btn" title="클립보드 붙여넣기 · 이미지는 서버에 올린 뒤 경로를 입력합니다" onClick={() => void pasteClipboard()}>붙여넣기</button></span><span className="rd-font-controls" role="group" aria-label="터미널 글자 크기"><button className="rd-font-btn" aria-label="글자 작게" disabled={fontSize <= FONT_MIN} onClick={() => onFontStep?.(-1)}>A−</button><span className="rd-font-size" aria-live="polite">{fontSize}</span><button className="rd-font-btn" aria-label="글자 크게" disabled={fontSize >= FONT_MAX} onClick={() => onFontStep?.(1)}>A+</button></span></div>
     {pendingTrust && <div className="rd-trust" role="alert"><strong>SSH 호스트 키를 확인해 주세요.</strong><code>{pendingTrust.fingerprint}</code><button className="primary compact" onClick={() => void approveTrust()}>신뢰하고 기존 세션 연결</button></div>}
     <div className="rd-mobile-segments" role="tablist" aria-label={`${host.name} 작업 보기`} onKeyDown={segmentKeyDown}><button id={`${tab.id}-terminal-tab`} role="tab" aria-selected={mobileView === 'terminal'} aria-controls={terminalPanelId} tabIndex={mobileView === 'terminal' ? 0 : -1} onClick={() => { setCollapsedPanes(EXPANDED_PANES); setMobileView('terminal'); }}>Terminal</button><button id={`${tab.id}-files-tab`} role="tab" aria-selected={mobileView === 'files'} aria-controls={filesPanelId} tabIndex={mobileView === 'files' ? 0 : -1} onClick={() => { setCollapsedPanes(EXPANDED_PANES); setMobileView('files'); }}>Files</button></div>
     <div className="rd-mobile-keys" role="toolbar" aria-label={`${host.name} 특수 키`} data-active={mobileView}>
@@ -688,7 +768,8 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
         <button type="button" aria-pressed={modsActive.ctrl} className={`rd-mkey rd-mkey--mod${modsActive.ctrl ? ' is-active' : ''}`} title="Ctrl (다음 키에 적용)" onPointerDown={(event) => { event.preventDefault(); toggleMobileModifier('ctrl'); }}>Ctrl</button>
         <button type="button" aria-pressed={modsActive.alt} className={`rd-mkey rd-mkey--mod${modsActive.alt ? ' is-active' : ''}`} title="Alt (다음 키에 적용)" onPointerDown={(event) => { event.preventDefault(); toggleMobileModifier('alt'); }}>Alt</button>
         {MOBILE_KEY_ROWS[0].map((key) => <button key={key.id} type="button" title={key.title} aria-label={key.title} className="rd-mkey" onPointerDown={(event) => { event.preventDefault(); pressMobileKey(key); }}>{key.label}</button>)}
-        <button type="button" title="클립보드 붙여넣기" aria-label="클립보드 붙여넣기" className="rd-mkey rd-mkey--paste" onPointerDown={(event) => event.preventDefault()} onClick={() => void pasteClipboard()}>붙임</button>
+        <button type="button" title="터미널 내용 복사" aria-label="터미널 내용 복사" className="rd-mkey rd-mkey--paste" onPointerDown={(event) => event.preventDefault()} onClick={copyFromTerminal}>복사</button>
+        <button type="button" title="클립보드 붙여넣기 (이미지 포함)" aria-label="클립보드 붙여넣기" className="rd-mkey rd-mkey--paste" onPointerDown={(event) => event.preventDefault()} onClick={() => void pasteClipboard()}>붙임</button>
       </div>
       <div className="rd-mobile-keys-row">
         {MOBILE_KEY_ROWS[1].map((key) => <button key={key.id} type="button" title={key.title} aria-label={key.title} className="rd-mkey" onPointerDown={(event) => { event.preventDefault(); pressMobileKey(key); }}>{key.label}</button>)}
@@ -707,6 +788,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
         {sftpId && (dual ? <div className="rd-sftp-duo" ref={duoRef}><div className="rd-sftp-col" style={{ flexGrow: split, flexBasis: 0 }}>{renderBrowser('a', false)}</div><div className="rd-sftp-vdivider" role="separator" aria-orientation="vertical" aria-label="두 파일 창 너비 조절" aria-valuemin={25} aria-valuemax={75} aria-valuenow={Math.round(split * 100)} tabIndex={0} onPointerDown={startSplitDrag} onPointerMove={moveSplitDrag} onPointerUp={endSplitDrag} onPointerCancel={endSplitDrag} onKeyDown={splitKey} /><div className="rd-sftp-col" style={{ flexGrow: 1 - split, flexBasis: 0 }}>{renderBrowser('b', false)}</div></div> : <div className="rd-sftp-col">{renderBrowser('a', true)}</div>)}
       </div></aside>
     </div>
+    {textView !== null && <Dialog label="터미널 내용 복사" onCancel={closeTextView}><div className="rd-textview"><p className="rd-textview-hint">복사할 부분을 선택한 뒤 ‘복사’를 누르세요. 선택하지 않으면 전체를 복사합니다.</p><textarea ref={textViewRef} className="rd-textview-text" readOnly spellCheck={false} wrap="off" value={textView} aria-label="터미널 내용" /><div className="rd-modal-actions"><button onClick={closeTextView}>닫기</button><button className="primary" onClick={copyTextView}>복사</button></div></div></Dialog>}
     {prompt && <Dialog light small label={prompt.mode === 'mkdir' ? '새 폴더 이름' : '이름 변경'} onCancel={() => setPrompt(null)}><label>{prompt.mode === 'mkdir' ? '새 폴더 이름' : '새 이름'}<input value={promptValue} onChange={(event) => setPromptValue(event.target.value)} /></label><div className="rd-modal-actions"><button onClick={() => setPrompt(null)}>취소</button><button className="primary" disabled={!promptValue.trim()} onClick={() => void runPrompt()}>확인</button></div></Dialog>}
     {confirm && <Dialog light small label="삭제 확인" onCancel={() => setConfirm(null)}><p><strong>{confirm.name}</strong>을(를) 삭제할까요? {confirm.kind === 'dir' && '빈 폴더만 삭제할 수 있습니다.'}</p><div className="rd-modal-actions"><button onClick={() => setConfirm(null)}>취소</button><button className="danger" onClick={() => void confirmDelete()}>삭제</button></div></Dialog>}
     {overwriteName && <Dialog light small label="덮어쓰기 확인" onCancel={() => { uploadFlow.cancel(); setOverwriteName(null); }}><p><strong>{overwriteName}</strong> 파일을 덮어쓸까요?</p><div className="rd-modal-actions"><button onClick={() => { uploadFlow.cancel(); setOverwriteName(null); }}>취소</button><button className="danger" onClick={() => { setOverwriteName(null); void uploadFlow.confirm(); }}>덮어쓰기</button></div></Dialog>}

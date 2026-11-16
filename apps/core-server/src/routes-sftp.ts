@@ -94,13 +94,21 @@ app.post('/api/sftp/sessions/:id/trust', async (req, reply) => {
   });
 
   // Upload: stream the raw request body to a temp file, then rename (atomic).
-  app.put('/api/sftp/sessions/:id/upload', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const q = req.query as { path?: string; overwrite?: string };
-    if (!q.path) throw httpError('path is required', 'bad_request', 400);
-    const overwrite = q.overwrite === 'true' || q.overwrite === '1';
-    await sftpManager.upload(id, req.raw, q.path, { overwrite });
-    return { ok: true };
+  // The body is the file itself, and a browser labels it with the file's own type
+  // (image/png, text/plain, application/json ...). In its own scope every type is passed
+  // through unread; with the default parsers an image was refused with 415 and a text or
+  // JSON file was consumed by the parser before it could be streamed.
+  app.register(async (scope) => {
+    scope.removeAllContentTypeParsers();
+    scope.addContentTypeParser('*', (_req, _payload, done) => done(null));
+    scope.put('/api/sftp/sessions/:id/upload', async (req) => {
+      const { id } = req.params as { id: string };
+      const q = req.query as { path?: string; overwrite?: string };
+      if (!q.path) throw httpError('path is required', 'bad_request', 400);
+      const overwrite = q.overwrite === 'true' || q.overwrite === '1';
+      await sftpManager.upload(id, req.raw, q.path, { overwrite });
+      return { ok: true };
+    });
   });
 
   // Download: stream the remote file to the response (bounded memory).

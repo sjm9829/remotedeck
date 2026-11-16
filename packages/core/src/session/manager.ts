@@ -36,9 +36,21 @@ interface Runtime {
   attachments: Map<string, Attachment>;
   buffer: RingBuffer;
   idleTimer: ReturnType<typeof setTimeout> | null;
+  /** Output that arrived inside the current batch window and is not sent yet. */
+  pendingOut: string;
+  /** Running while a batch window is open (see queueOutput). */
+  outTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const DEFAULT_SCROLLBACK_BYTES = 256 * 1024;
+/**
+ * Output batching. A shell that prints a lot emits thousands of tiny SSH data chunks;
+ * sending each as its own WebSocket frame makes the browser parse and render frame by
+ * frame. The first chunk after a quiet period is sent at once (a keystroke echo is not
+ * delayed); chunks that follow within the window are merged into one frame.
+ */
+export const OUTPUT_BATCH_MS = 8;
+export const OUTPUT_BATCH_MAX_CHARS = 64 * 1024;
 
 export class SessionManager extends EventEmitter {
   private runtimes = new Map<string, Runtime>();
@@ -82,7 +94,7 @@ export class SessionManager extends EventEmitter {
       const rt: Runtime = {
         id: session.id, hostId: session.hostId, credentialId: session.credentialId ?? null, state: 'creating',
         shell: null, writerId: null, viewers: new Map(), attachments: new Map(),
-        buffer: new RingBuffer(this.scrollbackBytes), idleTimer: null,
+        buffer: new RingBuffer(this.scrollbackBytes), idleTimer: null, pendingOut: '', outTimer: null,
       };
       this.runtimes.set(session.id, rt);
       try {
@@ -150,7 +162,7 @@ export class SessionManager extends EventEmitter {
     const credentialId = params.credentialId ?? host.credentialId ?? null;
     const row = this.opts.store.createSession({ hostId: host.id, credentialId, state: 'creating', writerId: params.writerId ?? null });
     const rt: Runtime = { id: row.id, hostId: host.id, credentialId, state: 'creating', shell: null, writerId: params.writerId ?? null,
-      viewers: new Map(), attachments: new Map(), buffer: new RingBuffer(this.scrollbackBytes), idleTimer: null };
+      viewers: new Map(), attachments: new Map(), buffer: new RingBuffer(this.scrollbackBytes), idleTimer: null, pendingOut: '', outTimer: null };
     this.runtimes.set(row.id, rt);
 
     if (!host.hostKeyTrusted) {
@@ -193,10 +205,10 @@ export class SessionManager extends EventEmitter {
     rt.shell = shell;
     shell.on('output', (data: string) => {
       rt.buffer.push(data);
-      const msg: WsOutputMessage = { type: 'output', ts: new Date().toISOString(), data: { data } };
-      for (const a of rt.attachments.values()) a.send(msg);
+      this.queueOutput(rt, data);
     });
     shell.on('close', () => {
+      this.flushOutput(rt);
       if (rt.state !== 'closing') { this.clearIdle(rt); this.setState(rt, 'closed'); }
     });
     this.setState(rt, 'active');
@@ -210,6 +222,9 @@ export class SessionManager extends EventEmitter {
     if (rt.state === 'closed' || rt.state === 'failed' || rt.state === 'awaiting-trust' || rt.state === 'creating') {
       const e = new Error('not_attachable'); (e as any).code = 'invalid_state'; throw e;
     }
+    // Send batched output to the clients already attached first: the newcomer gets it
+    // through the scrollback replay below and must not receive it twice.
+    this.flushOutput(rt);
     rt.attachments.set(attachment.id, attachment);
     if (attachment.role === 'writer') {
       if (rt.writerId && rt.writerId !== attachment.id) {
@@ -276,6 +291,7 @@ export class SessionManager extends EventEmitter {
     const rt = this.runtimes.get(sessionId);
     if (!rt) { const e = new Error('session_not_found'); (e as any).code = 'not_found'; throw e; }
     this.clearIdle(rt);
+    this.flushOutput(rt);
     this.setState(rt, 'closing');
     rt.shell?.close();
     for (const a of rt.attachments.values()) a.close?.(1000, 'closed');
@@ -292,6 +308,42 @@ export class SessionManager extends EventEmitter {
       if (att) return { rt, att };
     }
     const e = new Error('attachment_not_found'); (e as any).code = 'not_found'; throw e;
+  }
+
+  private sendOutput(rt: Runtime, data: string): void {
+    const msg: WsOutputMessage = { type: 'output', ts: new Date().toISOString(), data: { data } };
+    for (const a of rt.attachments.values()) a.send(msg);
+  }
+
+  /** Send now when the session was quiet; otherwise merge into the open batch window. */
+  private queueOutput(rt: Runtime, data: string): void {
+    if (!rt.outTimer) {
+      this.sendOutput(rt, data);
+      this.armOutputTimer(rt);
+      return;
+    }
+    rt.pendingOut += data;
+    if (rt.pendingOut.length >= OUTPUT_BATCH_MAX_CHARS) this.flushOutput(rt, true);
+  }
+
+  private armOutputTimer(rt: Runtime): void {
+    rt.outTimer = setTimeout(() => {
+      rt.outTimer = null;
+      if (!rt.pendingOut) return; // quiet again: the next chunk is sent at once
+      this.flushOutput(rt, true);
+    }, OUTPUT_BATCH_MS);
+    rt.outTimer.unref?.();
+  }
+
+  /** Send whatever is batched. `keepWindow` keeps batching the output that follows. */
+  private flushOutput(rt: Runtime, keepWindow = false): void {
+    if (rt.outTimer) { clearTimeout(rt.outTimer); rt.outTimer = null; }
+    if (rt.pendingOut) {
+      const data = rt.pendingOut;
+      rt.pendingOut = '';
+      this.sendOutput(rt, data);
+    }
+    if (keepWindow) this.armOutputTimer(rt);
   }
 
   /** Transition a session to failed and clean up any connection objects. */
@@ -323,6 +375,7 @@ export class SessionManager extends EventEmitter {
   dispose(): void {
     for (const rt of this.runtimes.values()) {
       this.clearIdle(rt);
+      this.flushOutput(rt);
       try { rt.shell?.close(); } catch {}
       for (const attachment of rt.attachments.values()) attachment.close?.(1001, 'server shutdown');
       rt.attachments.clear();

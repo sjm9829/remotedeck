@@ -370,3 +370,66 @@ describe('idleTimeoutMs = 0 (unlimited keep-alive)', () => {
     assert.equal(transport.shells.get('h:22:u')!.closed, false, 'SSH shell must stay alive indefinitely');
   });
 });
+
+describe('output batching', () => {
+  async function setup() {
+    const store = new MemoryStore(MK); const transport = new FakeTransport();
+    const mgr = new SessionManager({ store, transport, idleTimeoutMs: 5000 });
+    transport.setFingerprint({ host: 'h', port: 22, username: 'u' }, 'SHA256:x');
+    const host = store.createHost({ name: 'h', hostname: 'h', port: 22, username: 'u', credentialId: null, tags: [], hostKeyFingerprint: 'SHA256:x', hostKeyTrusted: true });
+    const sid = (await mgr.createSession({ hostId: host.id })).session.id;
+    const shell = transport.shells.get('h:22:u')!;
+    return { mgr, sid, shell };
+  }
+  const outputs = (inbox: any[]): string[] => inbox.filter((m) => m.type === 'output').map((m) => m.data.data);
+
+  it('sends the first chunk at once and merges a burst into few frames, in order', async () => {
+    const { mgr, sid, shell } = await setup();
+    const w = fakeAttachment('w', 'writer'); mgr.attach(sid, w.att);
+    shell.emitOutput('a');
+    assert.deepEqual(outputs(w.inbox), ['a'], 'a keystroke echo must not wait for the batch window');
+    for (let i = 0; i < 500; i++) shell.emitOutput(`line${i}\n`);
+    assert.deepEqual(outputs(w.inbox), ['a'], 'the burst is held while the window is open');
+    await sleep(40);
+    const got = outputs(w.inbox);
+    assert.ok(got.length <= 3, `500 chunks must collapse into a few frames, got ${got.length}`);
+    assert.equal(got.join(''), 'a' + Array.from({ length: 500 }, (_, i) => `line${i}\n`).join(''));
+    // After a quiet period the next chunk is immediate again.
+    await sleep(30);
+    shell.emitOutput('z');
+    assert.equal(outputs(w.inbox).at(-1), 'z');
+    mgr.dispose();
+  });
+
+  it('a very large burst is flushed before the window ends', async () => {
+    const { mgr, sid, shell } = await setup();
+    const w = fakeAttachment('w', 'writer'); mgr.attach(sid, w.att);
+    shell.emitOutput('x');
+    const big = 'y'.repeat(40 * 1024);
+    shell.emitOutput(big); shell.emitOutput(big);
+    assert.deepEqual(outputs(w.inbox).map((s) => s.length), [1, 80 * 1024]);
+    mgr.dispose();
+  });
+
+  it('a client attaching mid-burst gets the output once (scrollback only)', async () => {
+    const { mgr, sid, shell } = await setup();
+    const w = fakeAttachment('w', 'writer'); mgr.attach(sid, w.att);
+    shell.emitOutput('one'); shell.emitOutput('two');
+    const v = fakeAttachment('v', 'viewer'); mgr.attach(sid, v.att);
+    assert.deepEqual(outputs(w.inbox), ['one', 'two'], 'attached clients are flushed before the newcomer joins');
+    await sleep(30);
+    assert.deepEqual(outputs(v.inbox), [], 'the newcomer must not get batched output again');
+    assert.equal(v.inbox.find((m) => m.type === 'scrollback').data.data, 'onetwo');
+    mgr.dispose();
+  });
+
+  it('batched output is delivered before the closed status', async () => {
+    const { mgr, sid, shell } = await setup();
+    const w = fakeAttachment('w', 'writer'); mgr.attach(sid, w.att);
+    shell.emitOutput('bye'); shell.emitOutput('!');
+    shell.close();
+    const types = w.inbox.map((m) => (m.type === 'output' ? `out:${m.data.data}` : `${m.type}:${m.data.status ?? ''}`));
+    assert.ok(types.indexOf('out:!') !== -1 && types.indexOf('out:!') < types.indexOf('status:closed'), types.join(','));
+    mgr.dispose();
+  });
+});

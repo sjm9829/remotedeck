@@ -94,3 +94,36 @@ describe('sftp REST error mapping (403 / 404 / 409)', () => {
     assert.equal(res.statusCode, 401);
   });
 });
+
+describe('sftp upload over real HTTP (body reaches the file whatever its Content-Type)', () => {
+  let ctx: Ctx; let base = '';
+  before(async () => { ctx = await build(); base = await ctx.app.listen({ port: 0, host: '127.0.0.1' }); });
+  after(async () => { await ctx.close(); });
+
+  for (const type of ['image/png', 'text/plain', 'application/json', 'application/octet-stream', '']) {
+    it(`uploads a body sent as ${type || '(no content-type)'}`, async () => {
+      const name = `up-${type.replace(/\W/g, '') || 'none'}.bin`;
+      const body = Buffer.from(type === 'application/json' ? '{"a":1}' : `payload for ${type}`);
+      const res = await fetch(`${base}/api/sftp/sessions/${ctx.sessionId}/upload?path=${name}`, {
+        method: 'PUT', headers: { ...AUTH, ...(type ? { 'content-type': type } : {}) }, body,
+      });
+      assert.equal(res.status, 200, await res.text());
+      const stored = ctx.transport.fs.get(`/root/${name}`);
+      assert.ok(stored, 'file must exist');
+      assert.deepEqual(Buffer.from(stored!.data), body, 'the whole body must be written');
+    });
+  }
+
+  it('still requires authentication', async () => {
+    const res = await fetch(`${base}/api/sftp/sessions/${ctx.sessionId}/upload?path=nope.bin`, { method: 'PUT', headers: { 'content-type': 'image/png' }, body: Buffer.from('x') });
+    assert.equal(res.status, 401);
+    assert.equal(ctx.transport.fs.has('/root/nope.bin'), false);
+  });
+
+  it('JSON routes still parse JSON after the upload scope was added', async () => {
+    // A parsed body reaches path validation (403 outside_root); an unparsed one would be 400 "path is required".
+    const res = await fetch(`${base}/api/sftp/sessions/${ctx.sessionId}/mkdir`, { method: 'POST', headers: { ...AUTH, 'content-type': 'application/json' }, body: JSON.stringify({ path: '../escape' }) });
+    assert.equal(res.status, 403);
+    assert.equal(((await res.json()) as any).error.code, 'outside_root');
+  });
+});
