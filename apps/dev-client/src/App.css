@@ -127,6 +127,19 @@ textarea { min-height: 112px; padding-block: 8px; resize: vertical; font-family:
 .rd-sftp-body > .rd-sftp-col { flex: 1 1 auto; }
 .rd-sftp-vdivider { flex: 0 0 6px; width: 6px; cursor: col-resize; background: #0c1118; border-inline: 1px solid var(--rd-border); touch-action: none; }
 .rd-sftp-vdivider:hover, .rd-sftp-vdivider:focus-visible { background: var(--rd-accent); }
+/* Touch devices (phones and tablets): the special-key bar (Ctrl/Alt/Esc/Tab/arrows…) above the terminal.
+   On phones it hides while the Files view is shown; tablets keep both panes visible, so it always shows. */
+@media (pointer: coarse) {
+  .rd-mobile-keys { display: block; flex: 0 0 auto; padding: 3px 4px; border-bottom: 1px solid var(--rd-border); background: #0d131b; }
+  .rd-mobile-keys-row { display: flex; gap: 4px; }
+  .rd-mobile-keys-row + .rd-mobile-keys-row { margin-top: 3px; }
+  .rd-mkey { flex: 1 1 0; min-width: 0; min-height: 30px; padding: 0 2px; border: 1px solid var(--rd-border); border-radius: 6px; background: #1b2532; color: #cfd9e6; font-size: 12px; line-height: 1; touch-action: manipulation; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+  .rd-mkey:active { background: #2b3949; }
+  .rd-mkey--mod { flex: 0 0 auto; padding-inline: 10px; font-weight: 600; }
+  .rd-mkey--paste { flex: 1.3 1 0; }
+  .rd-mkey--mod.is-active { border-color: var(--rd-accent); background: var(--rd-panel-3); color: #fff; box-shadow: inset 0 -2px var(--rd-accent); }
+}
+
 @container remote-deck (max-width: 599px) { .rd-sftp-vdivider { display: none; } .rd-sftp-duo { flex-direction: column; } }
 .rd-divider { flex: 0 0 6px; width: 100%; height: 6px; border-block: 1px solid var(--rd-border); background: #0c1118; cursor: row-resize; touch-action: none; }
 .rd-divider:hover, .rd-divider:focus-visible { background: var(--rd-accent); }
@@ -226,15 +239,7 @@ textarea { min-height: 112px; padding-block: 8px; resize: vertical; font-family:
   .rd-mobile-segments { display: grid; grid-template-columns: 1fr 1fr; flex: 0 0 auto; padding: 3px 4px; gap: 4px; border-bottom: 1px solid var(--rd-border); background: #10161e; }
   .rd-mobile-segments button { min-height: 30px; border-color: transparent; background: transparent; }
   .rd-mobile-segments button[aria-selected="true"] { border-color: var(--rd-border-strong); background: var(--rd-panel-3); color: white; box-shadow: inset 0 -2px var(--rd-accent); }
-  .rd-mobile-keys { display: block; flex: 0 0 auto; padding: 3px 4px; border-bottom: 1px solid var(--rd-border); background: #0d131b; }
   .rd-mobile-keys[data-active="files"] { display: none; }
-  .rd-mobile-keys-row { display: flex; gap: 4px; }
-  .rd-mobile-keys-row + .rd-mobile-keys-row { margin-top: 3px; }
-  .rd-mkey { flex: 1 1 0; min-width: 0; min-height: 30px; padding: 0 2px; border: 1px solid var(--rd-border); border-radius: 6px; background: #1b2532; color: #cfd9e6; font-size: 12px; line-height: 1; touch-action: manipulation; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
-  .rd-mkey:active { background: #2b3949; }
-  .rd-mkey--mod { flex: 0 0 auto; padding-inline: 10px; font-weight: 600; }
-  .rd-mkey--paste { flex: 1.3 1 0; }
-  .rd-mkey--mod.is-active { border-color: var(--rd-accent); background: var(--rd-panel-3); color: #fff; box-shadow: inset 0 -2px var(--rd-accent); }
   .rd-split { display: block; position: relative; }
   .rd-sftp-pane, .rd-terminal-pane { position: absolute; inset: 0; width: 100% !important; height: 100% !important; max-width: none; max-height: none; min-width: 0; min-height: 0; }
   .rd-terminal-pane[data-collapsed="true"] .rd-terminal-wrap { display: block; }
