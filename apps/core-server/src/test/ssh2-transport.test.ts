@@ -82,7 +82,16 @@ function startFixture(): Promise<Fixture> {
         session.on('pty', (acc: any) => { acc(); });
         session.on('shell', (acc: any) => {
           shellStream = acc();
-          shellStream.on('data', (d: Buffer) => shellStream.write('ECHO:' + d.toString()));
+          shellStream.on('data', (d: Buffer) => {
+            if (d.toString() === 'SPLIT') {
+              // Emit a Korean string split mid-character across two SSH data packets.
+              const bytes = Buffer.from('<한글>', 'utf8');
+              shellStream.write(bytes.subarray(0, 2));
+              setTimeout(() => shellStream.write(bytes.subarray(2)), 50);
+              return;
+            }
+            shellStream.write('ECHO:' + d.toString());
+          });
         });
         // window-change is a notification-only channel request: accept/reject are undefined
         // at runtime (ssh2 auto-accepts it); only `info` is meaningful.
@@ -154,6 +163,16 @@ describe('ssh2 transport (loopback integration)', () => {
       h.write('ping');
       const out = await p;
       assert.ok(out.includes('ECHO:ping'), 'expected echoed ping, got: ' + JSON.stringify(out));
+    } finally { h.close(); }
+  });
+
+  it('multi-byte characters split across SSH data chunks are decoded intact', async () => {
+    const h = await transport.connectShell(target({ password: PW }), fx.hostFingerprint);
+    try {
+      const p = collectUntil(h, '>');
+      h.write('SPLIT');
+      const out = await p;
+      assert.equal(out, '<한글>', 'got: ' + JSON.stringify(out));
     } finally { h.close(); }
   });
 

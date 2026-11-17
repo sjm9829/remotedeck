@@ -1,6 +1,7 @@
 import { Client } from 'ssh2';
 import type { ConnectConfig } from 'ssh2';
 import { EventEmitter } from 'node:events';
+import { StringDecoder } from 'node:string_decoder';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { SshTransport, ShellHandle, TransportTarget } from '@remotedeck/core/session/transport';
 import { connectSsh } from './ssh-connect.js';
@@ -99,7 +100,10 @@ export class Ssh2Transport implements SshTransport {
       throw e;
     }
     const handle = new SshShellHandle(conn, stream);
-    stream.on('data', (d: Buffer) => handle.emit('output', d.toString('utf8')));
+    // A stateful decoder keeps multi-byte UTF-8 characters (Korean, emoji) that
+    // straddle two SSH data chunks intact; per-chunk toString() emits U+FFFD.
+    const decoder = new StringDecoder('utf8');
+    stream.on('data', (d: Buffer) => { const text = decoder.write(d); if (text) handle.emit('output', text); });
     stream.on('error', () => handle.close());
     stream.on('close', () => handle.close());
     conn.on('close', () => handle.close());
