@@ -192,6 +192,8 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   const mountedRef = useRef(true);
   // Short non-blocking confirmations (upload done, copied, reconnected …).
   const [toast, setToast] = useState('');
+  /** Scrollback chunks still being parsed; OSC 52 inside them is ignored. */
+  const replayingRef = useRef(0);
   const toastTimerRef = useRef<number | null>(null);
   const notifyRef = useRef<(message: string) => void>(() => undefined);
   notifyRef.current = (message: string) => { if (!mountedRef.current) return; setToast(message); if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current); toastTimerRef.current = window.setTimeout(() => { toastTimerRef.current = null; setToast(''); }, 2600); };
@@ -372,6 +374,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     // Programs that own the mouse (Claude Code, tmux, vim) copy with OSC 52.
     try {
       const osc = terminal.parser.registerOscHandler(52, (data) => {
+        if (replayingRef.current > 0) return true; // history replayed on re-attach: do not copy (or pop up) again
         const text = parseOsc52(data);
         if (text) void copyText(text).then((ok) => { if (ok) notifyRef.current('복사했습니다'); else if (mountedRef.current) setTextView(text); });
         return true;
@@ -504,7 +507,12 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
       heartbeat.touch();
       try {
         const message = JSON.parse(event.data);
-        if (message.type === 'output' || message.type === 'scrollback') termRef.current?.write(message.data.data);
+        if (message.type === 'output') termRef.current?.write(message.data.data);
+        else if (message.type === 'scrollback' && termRef.current) {
+          // Replayed history: copy requests in it (OSC 52) were already handled when they first ran.
+          replayingRef.current += 1;
+          termRef.current.write(message.data.data, () => { replayingRef.current = Math.max(0, replayingRef.current - 1); });
+        }
         if (message.type === 'pong' && pingSentAtRef.current) { setLatencyMs(Math.round(performance.now() - pingSentAtRef.current)); pingSentAtRef.current = 0; }
         if (message.type === 'status') {
           if (isTerminalSessionState(message.data.status)) { endSession('SSH 세션이 종료되었습니다'); return; }
