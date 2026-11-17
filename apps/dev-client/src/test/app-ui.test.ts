@@ -120,6 +120,25 @@ describe('App — same-origin (production) UI contract', () => {
     expect(html).toContain('data-workspace-id="tab-1"');
     expect(html).toMatch(/aria-label="K6 · 2 작업 공간"[^>]*hidden=""[^>]*data-workspace-id="tab-2"/);
   });
+
+  it('re-mounts a workspace with the pane layout it had (collapsed file pane, size)', async () => {
+    await render(SAME_ORIGIN_ENV);
+    const { WorkspacePane } = await import('../App.js');
+    const React = await import('react');
+    const { renderToString } = await import('react-dom/server');
+    const store = new Map<string, string>([['remotedeck:pane:v1:tab-1', JSON.stringify({ sftpCollapsed: true, sftpHeight: 400, mobileView: 'files' })]]);
+    Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); }, removeItem: (k: string) => { store.delete(k); } } });
+    try {
+      const host = { id: 'h1', name: 'K6', hostname: 'k6.internal', port: 22, username: 'operator', credentialId: null, tags: [], hostKeyFingerprint: null, hostKeyTrusted: false, createdAt: '', updatedAt: '' };
+      const html = renderToString(React.createElement(WorkspacePane, { tab: { id: 'tab-1', hostId: 'h1', label: 'K6 · 1', sessionId: null, sftpSessionId: null }, host, client: {} as any, active: true }));
+      expect(html).toContain('data-sftp-collapsed="true"');
+      expect(html).toContain('data-ssh-collapsed="false"');
+      expect(html).toContain('aria-label="SFTP 펼치기"');
+      expect(html).toContain('data-mobile-view="files"');
+    } finally {
+      Reflect.deleteProperty(globalThis, 'sessionStorage');
+    }
+  });
 });
 
 describe('App — destructive-confirm modals (renderToString)', () => {

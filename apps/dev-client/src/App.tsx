@@ -41,6 +41,7 @@ import { EXPANDED_PANES, togglePaneCollapse } from './pane-collapse.js';
 import { closeRemoteSessionOnce } from './session-cleanup.js';
 import { terminalIdentity } from './terminal-identity.js';
 import { saveTabState, loadTabState, type PersistedTabState } from './session-persistence.js';
+import { clearPaneState, loadPaneState, savePaneState, type PersistedPane } from './pane-persistence.js';
 import { attachHangulComposer, isIosDevice } from './ios-hangul-input.js';
 import { PASTE_IMAGE_DIR, PASTE_IMAGE_MAX_BYTES, bufferText, copyText, imageFilesFrom, isPasteShortcut, parseOsc52, pasteCarriesImage, pasteImageName, readClipboard } from './terminal-clipboard.js';
 
@@ -173,6 +174,10 @@ export function reconnectLabel(state: SshUiState): string | null {
 }
 
 export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId, fontSize = 14, onFontStep, containerWidth = 0, isMobile = false }: { tab: WorkspaceTab; host: Host; client: RemoteDeckClient; active: boolean; fontSize?: number; onFontStep?: (delta: number) => void; containerWidth?: number; isMobile?: boolean; onStatus?: (tabId: string, status: 'idle' | 'connecting' | 'connected' | 'error') => void; onSessionId?: (tabId: string, sessionId: string | null) => void }) {
+  // Pane layout survives a re-mount (Workbench page switch, reload): read once per tab.
+  const savedPaneRef = useRef<PersistedPane | null>(null);
+  if (savedPaneRef.current === null) savedPaneRef.current = loadPaneState(tab.id);
+  const savedPane = savedPaneRef.current;
   const [sshState, setSshState] = useState<SshUiState>('idle');
   const [sshStatus, setSshStatus] = useState('연결 전');
   const [sessionId, setSessionId] = useState(tab.sessionId ?? '');
@@ -220,19 +225,19 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   // a slow network path is visible instead of looking like a slow terminal.
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const pingSentAtRef = useRef(0);
-  const [collapsedPanes, setCollapsedPanes] = useState(EXPANDED_PANES);
+  const [collapsedPanes, setCollapsedPanes] = useState(() => ({ ssh: savedPane.sshCollapsed ?? false, sftp: savedPane.sftpCollapsed ?? false }));
   const { ssh: sshCollapsed, sftp: sftpCollapsed } = collapsedPanes;
-  const [mobileView, setMobileView] = useState<'terminal' | 'files'>('terminal');
+  const [mobileView, setMobileView] = useState<'terminal' | 'files'>(savedPane.mobileView ?? 'terminal');
   const modifierRef = useRef<ModifierState>(NO_MODIFIERS);
   const [modsActive, setModsActive] = useState<ModifierState>(NO_MODIFIERS);
   const applyModifiers = useCallback((next: ModifierState) => { modifierRef.current = next; setModsActive(next); }, []);
-  const [sftpHeight, setSftpHeight] = useState(DEFAULT_SFTP_HEIGHT);
+  const [sftpHeight, setSftpHeight] = useState(savedPane.sftpHeight ?? DEFAULT_SFTP_HEIGHT);
   const dragRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
   // File pane placement: docked right of the terminal in wide windows, otherwise below it.
   const [dockPref, setDockPref] = useState<SftpDock>(() => initialDock(loadDock(), containerWidth));
   const dockMode = effectiveDock(dockPref, containerWidth, isMobile);
   const dockAvailable = canDockRight(containerWidth, isMobile);
-  const [sftpWidth, setSftpWidth] = useState(DEFAULT_SFTP_WIDTH);
+  const [sftpWidth, setSftpWidth] = useState(() => savedPane.sftpWidth === undefined ? DEFAULT_SFTP_WIDTH : containerWidth > 0 ? clampSftpWidth(savedPane.sftpWidth, containerWidth) : savedPane.sftpWidth);
   const dragWRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const toggleDock = () => { const next: SftpDock = dockMode === 'right' ? 'bottom' : 'right'; setDockPref(next); saveDock(next); };
   const [dropSide, setDropSide] = useState<PaneSide | null>(null);
@@ -253,8 +258,8 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   const [overwriteName, setOverwriteName] = useState<string | null>(null);
   // Dual-pane (split window) state: the left pane reuses sftpPath/sftpFiles (side 'a');
   // the right pane keeps its own path/list (side 'b'). Both share one SFTP session.
-  const [dual, setDual] = useState(false);
-  const [split, setSplit] = useState(DEFAULT_SPLIT);
+  const [dual, setDual] = useState(savedPane.dual ?? false);
+  const [split, setSplit] = useState(savedPane.split ?? DEFAULT_SPLIT);
   const [bPath, setBPath] = useState('');
   const [bFiles, setBFiles] = useState<FileEntry[]>([]);
   const bPathRef = useRef('');
@@ -297,6 +302,11 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   useEffect(() => { sftpReadyIdRef.current = sftpId; }, [sftpId]);
   useEffect(() => { hostNameRef.current = host.name; }, [host.name]);
   useEffect(() => { sftpPathRef.current = sftpPath; }, [sftpPath]);
+  useEffect(() => {
+    // Folders are saved only once listed, so a pane that is still connecting
+    // does not overwrite the folder it is about to restore.
+    savePaneState(tab.id, { sshCollapsed, sftpCollapsed, sftpHeight, sftpWidth, dual, split, mobileView, ...(sftpPath ? { path: sftpPath } : {}), ...(bPath ? { bPath } : {}) });
+  }, [tab.id, sshCollapsed, sftpCollapsed, sftpHeight, sftpWidth, dual, split, mobileView, sftpPath, bPath]);
   useEffect(() => { sftpFilesRef.current = sftpFiles; }, [sftpFiles]);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
   useEffect(() => { sshStateRef.current = sshState; }, [sshState]);
@@ -308,7 +318,15 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   useEffect(() => () => { heartbeat.stop(); if (retryTimerRef.current !== null) { window.clearTimeout(retryTimerRef.current); retryTimerRef.current = null; } }, [heartbeat]);
   useEffect(() => createSftpUnmountCleanup(client, () => sftpIdRef.current, closedSftpSessionIdsRef.current), [client]);
   const loadSide = useCallback(async (side: PaneSide, id: string, path: string) => { const result = await client.sftpList(id, path); if (!mountedRef.current) return; if (side === 'a') { setSftpFiles(result.files); setSftpPath(result.path); setSftpStatus(result.path || '/'); } else { setBFiles(result.files); setBPath(result.path); } }, [client]);
-  const loadFiles = useCallback((id: string, path: string) => loadSide('a', id, path), [loadSide]);
+  /** First listing of a new SFTP session: back to the saved folders, home if they are gone. */
+  const loadInitialFiles = useCallback(async (id: string) => {
+    const saved = savedPaneRef.current ?? {};
+    await (saved.path ? loadSide('a', id, saved.path).catch(() => loadSide('a', id, '')) : loadSide('a', id, ''));
+    if (saved.dual && mountedRef.current) {
+      const fallback = sftpPathRef.current;
+      await (saved.bPath ? loadSide('b', id, saved.bPath).catch(() => loadSide('b', id, fallback)) : loadSide('b', id, fallback));
+    }
+  }, [loadSide]);
   const uploadFlow = useMemo(() => createUploadFlow(async (file, overwrite) => {
     const id = sftpIdRef.current; if (!id) return;
     const { side, dir } = uploadTarget.current;
@@ -565,9 +583,9 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     try { const result = await client.createSftpSession({ hostId: host.id, rootPath: '/' }); sftpIdRef.current = result.session.id;
       if (!mountedRef.current) { closeRemoteSessionOnce(result.session.id, closedSftpSessionIdsRef.current, (id) => client.closeSftpSession(id)); return; }
       if (result.requiresTrust) { setSftpTrust({ id: result.session.id, fingerprint: result.fingerprint ?? '' }); setSftpStatus('SFTP 호스트 키 확인 필요'); }
-      else { setSftpId(result.session.id); await loadFiles(result.session.id, ''); }
+      else { setSftpId(result.session.id); await loadInitialFiles(result.session.id); }
     } catch (error) { if (mountedRef.current) { setSftpError((error as Error).message); setSftpStatus('SFTP를 사용할 수 없음'); } } finally { if (mountedRef.current) setSftpBusy(false); }
-  }, [client, host.id, loadFiles, sftpBusy]);
+  }, [client, host.id, loadInitialFiles, sftpBusy]);
   const connectWorkspace = async () => {
     await startWorkspaceConnections(
       () => sshState === 'ready' && sessionId ? attachSession(sessionId) : (sshState === 'idle' || sshState === 'error') ? connectSsh() : Promise.resolve(),
@@ -578,7 +596,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
   useEffect(() => scheduleWorkspaceAutoStart(() => workspaceStartRef.current(), workspaceStartedRef), []);
   const toggleSshCollapsed = () => setCollapsedPanes((current) => togglePaneCollapse(current, 'ssh'));
   const toggleSftpCollapsed = () => setCollapsedPanes((current) => togglePaneCollapse(current, 'sftp'));
-  const approveSftpTrust = async () => { if (!sftpTrust) return; setSftpBusy(true); setSftpError(''); try { await client.trustSftpSession(sftpTrust.id); sftpIdRef.current = sftpTrust.id; if (!mountedRef.current) { closeRemoteSessionOnce(sftpTrust.id, closedSftpSessionIdsRef.current, (id) => client.closeSftpSession(id)); return; } setSftpId(sftpTrust.id); setSftpTrust(null); await loadFiles(sftpTrust.id, ''); } catch (error) { if (mountedRef.current) setSftpError((error as Error).message); } finally { if (mountedRef.current) setSftpBusy(false); } };
+  const approveSftpTrust = async () => { if (!sftpTrust) return; setSftpBusy(true); setSftpError(''); try { await client.trustSftpSession(sftpTrust.id); sftpIdRef.current = sftpTrust.id; if (!mountedRef.current) { closeRemoteSessionOnce(sftpTrust.id, closedSftpSessionIdsRef.current, (id) => client.closeSftpSession(id)); return; } setSftpId(sftpTrust.id); setSftpTrust(null); await loadInitialFiles(sftpTrust.id); } catch (error) { if (mountedRef.current) setSftpError((error as Error).message); } finally { if (mountedRef.current) setSftpBusy(false); } };
   const runSftp = async (action: () => Promise<void>) => { setSftpBusy(true); setSftpError(''); try { await action(); } catch (error) { setSftpError((error as Error).message); } finally { setSftpBusy(false); } };
   const navigate = (side: PaneSide, path: string) => { if (sftpId) void runSftp(() => loadSide(side, sftpId, path)); };
   const runPrompt = async () => { if (!prompt || !sftpId || !promptValue.trim()) return; const value = promptValue.trim(); const side = prompt.side; const dir = pathRefOf(side).current; await runSftp(async () => { if (prompt.mode === 'mkdir') await client.sftpMkdir(sftpId, joinSftpPath(dir, value)); else await client.sftpRename(sftpId, joinSftpPath(dir, prompt.from), joinSftpPath(dir, value)); await loadSide(side, sftpId, dir); notifyRef.current(prompt.mode === 'mkdir' ? '폴더를 만들었습니다' : '이름을 변경했습니다'); }); setPrompt(null); };
@@ -928,6 +946,7 @@ export function App() {
   const closeTab = (tabId: string, index: number) => {
     const fallback = tabs.tabs[index + 1] ?? tabs.tabs[index - 1];
     setTabs((current) => closeWorkspaceTab(current, tabId));
+    clearPaneState(tabId);
     setTabStatus((current) => { if (!(tabId in current)) return current; const next = { ...current }; delete next[tabId]; return next; });
     if (fallback) requestAnimationFrame(() => document.getElementById(`${fallback.id}-tab`)?.focus());
   };
