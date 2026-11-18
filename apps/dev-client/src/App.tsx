@@ -1,3 +1,4 @@
+import { onThemeChange, terminalTheme } from './theme.js';
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type DragEvent as ReactDragEvent, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -349,7 +350,7 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
 
   useEffect(() => {
     if (!termEl.current) return;
-    const terminal = new Terminal({ cols: 80, rows: 24, convertEol: true, fontSize: fontSizeRef.current, fontFamily: TERMINAL_FONT_FAMILY, scrollback: TERMINAL_SCROLLBACK, macOptionIsMeta: true, allowProposedApi: true, theme: { background: '#10151d', foreground: '#d8e1ee', cursor: '#55b7ff' } });
+    const terminal = new Terminal({ cols: 80, rows: 24, convertEol: true, fontSize: fontSizeRef.current, fontFamily: TERMINAL_FONT_FAMILY, scrollback: TERMINAL_SCROLLBACK, macOptionIsMeta: true, allowProposedApi: true, theme: terminalTheme() });
     const fit = new FitAddon(); terminal.loadAddon(fit); terminal.loadAddon(new WebLinksAddon());
     // Unicode 11 widths keep Korean/emoji cells aligned in TUIs (Codex, htop, tmux).
     try { terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11'; } catch { /* keep default widths */ }
@@ -359,6 +360,8 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
     // context (too many tabs), the terminal falls back to the DOM renderer by itself.
     try { const webgl = new WebglAddon(); webgl.onContextLoss(() => { try { webgl.dispose(); } catch { /* already disposed */ } }); terminal.loadAddon(webgl); } catch { /* keep the DOM renderer */ }
     const cleanups: Array<() => void> = [];
+    // Light / dark follows the Workbench (theme.ts).
+    cleanups.push(onThemeChange((theme) => { terminal.options.theme = terminalTheme(theme); }));
     // iOS/iPadOS Korean keyboards do not use composition events; see ios-hangul-input.ts.
     if (isIosDevice() && terminal.element && terminal.textarea) cleanups.push(attachHangulComposer(terminal.element, terminal.textarea, { send: (data) => terminal.input(data, true), modifiersArmed: () => modifierRef.current.ctrl || modifierRef.current.alt }));
     {
