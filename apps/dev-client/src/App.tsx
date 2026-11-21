@@ -350,7 +350,8 @@ export function WorkspacePane({ tab, host, client, active, onStatus, onSessionId
 
   useEffect(() => {
     if (!termEl.current) return;
-    const terminal = new Terminal({ cols: 80, rows: 24, convertEol: true, fontSize: fontSizeRef.current, fontFamily: TERMINAL_FONT_FAMILY, scrollback: TERMINAL_SCROLLBACK, macOptionIsMeta: true, allowProposedApi: true, theme: terminalTheme() });
+    // No convertEol: the SSH PTY already sends CRLF, and readline/TUIs use a bare LF to move the cursor down one row in the same column. Converting it to CRLF misplaced redrawn long command lines.
+    const terminal = new Terminal({ cols: 80, rows: 24, fontSize: fontSizeRef.current, fontFamily: TERMINAL_FONT_FAMILY, scrollback: TERMINAL_SCROLLBACK, macOptionIsMeta: true, allowProposedApi: true, theme: terminalTheme() });
     const fit = new FitAddon(); terminal.loadAddon(fit); terminal.loadAddon(new WebLinksAddon());
     // Unicode 11 widths keep Korean/emoji cells aligned in TUIs (Codex, htop, tmux).
     try { terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11'; } catch { /* keep default widths */ }
